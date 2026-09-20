@@ -106,7 +106,7 @@ def parse_args():
     voice.add_argument("--voiceover", default=None,
                        help="Reuse an existing MP3 and skip TTS entirely")
     voice.add_argument("--tts", default=None,
-                       choices=["ai33pro", "twospeaker", "edge-tts", "omnivoice"],
+                       choices=["ai33pro", "twospeaker", "edge-tts", "omnivoice", "famespeak"],
                        help="TTS provider (default: ai33pro from config)")
     voice.add_argument("--tts-base-url", default=None,
                        help="Override TTS API base URL")
@@ -266,18 +266,24 @@ def main():
         tts_provider = pick(args.tts, "tts", "ai33pro")
         # Resolve TTS credentials + voice from CLI / config / env, in priority order.
         _vo_id = pick(args.voice_id, "voice_id",
-                      "elevenlabs_SAz9YHcvj6GT2YYXdXww" if tts_provider == "ai33pro"
+                      "elevenlabs_SAz9YHcvj6GT2YYXdXww" if tts_provider in ("ai33pro", "famespeak")
                       else "gcdNeREzHPJpCf9wnB0l")
         _vo_speed = float(pick(args.speed, "speed", 0.95))
         _api_key = (args.api_key
+                    or os.environ.get("FAMESPEAK_API_KEY")
                     or os.environ.get("VOICEOVER_API_KEY")
                     or os.environ.get("TWOSPEAKER_API_KEY")
                     or DEFAULT_API_KEY)
         vo_engine = VoiceoverEngine(
             api_key=_api_key, voice_id=_vo_id, speed=_vo_speed,
-            base_url=pick(args.tts_base_url, "tts_base_url",
-                          "https://api.ai33.pro" if tts_provider == "ai33pro"
-                          else "https://api.twospeaker.com"),
+            # FameSpeak must always hit its own API even when the topic config
+            # still carries the stale ai33pro tts_base_url; an explicit CLI
+            # --tts-base-url still wins.
+            base_url=(args.tts_base_url
+                      or ("https://famespeak.online" if tts_provider == "famespeak" else None)
+                      or pick(None, "tts_base_url",
+                              "https://api.ai33.pro" if tts_provider == "ai33pro"
+                              else "https://api.twospeaker.com")),
             provider=tts_provider)
         master_mp3 = os.path.join(work_dir, "voiceover.mp3")
         master_mp3, vo_dur = vo_engine.synthesize(script_text, work_dir, master_mp3)

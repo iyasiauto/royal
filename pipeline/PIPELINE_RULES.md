@@ -185,3 +185,45 @@
 # keep total = voiceover length.
 # - Enforced in: timeline_engine.py (_clip_seg_dur) + render_engine.py (clip path,
 #   no -stream_loop). Quarantined-shaky clips (RULE 9) never enter the pool.
+
+## RULE 37: Segment-Scoped Entity Inference (Video 19 wrong-person fix)
+# The semantic matcher used to credit entity names found in a +/-8s padded
+# window around each segment. A name spoken in a neighbouring segment ("Diana")
+# became co-dominant and its pictures could be picked while a different name
+# ("Meghan Markle") was being spoken. Entity inference is now strictly scoped
+# to the words spoken *inside the segment itself*:
+#   - entities_in() weights only count for SRT spans overlapping [start, end].
+#   - The partial-overlap credit (folder "princess diana" vs spoken "diana")
+#     is scored against in-segment tokens only, not the padded context tokens.
+#   - Scoring tokens remain padded (+/-8s) so visual richness is unaffected.
+# - Enforced in: semantic_matcher.py (SemanticMatcher.query).
+
+## RULE 38: default_entity Normalisation
+# Config "default_entity" values like "meghan_markle" never matched folder
+# entities like "meghan markle", so the "fall back to the documentary's own
+# subject" path was silently dead. Both TimelineEngine.build_matcher and
+# SemanticMatcher.__init__ now normalise default_entity with
+# .lower().replace("_", " ") before any comparison.
+# - Enforced in: timeline_engine.py (build_matcher), semantic_matcher.py (__init__).
+
+## RULE 39: Two Thumbnails Per Video (1280x720)
+# Every video ships with 2 thumbnails, ultra-realistic 4K HD style, 1280x720,
+# topic-matched to that video, saved in the video folder next to the final MP4
+# as thumbnail_1.jpg / thumbnail_2.jpg.
+# - Type 1 (reaction split): left = shocked reaction close-up of the subject,
+#   right = main event scene, small red-bordered inset portrait, red
+#   "BREAKING NEWS" banner bottom-left, white bar with huge quoted headline.
+# - Type 2 (dual subject): diagonal split of the two key subjects (one with
+#   phone/documents), red "LIVE" badge top-left, red kicker banner
+#   ("ROYAL UPDATE"), white bar with huge headline.
+# - Reference specs: THUMBNAIL_TEMPLATES.md.
+
+## RULE 40: YouTube Metadata Structure (v2, from Video 20)
+# The metadata TXT in each video folder follows this exact structure:
+#   3 Alternative Titles — 20% Improved
+#   Short Description (2-3 sentences) + disclaimer paragraph
+#   Video CHAPTERS: (MM:SS titles from section headings)
+#   Hashtags: 3-4 related
+#   Tags: 4-5 related
+#   Pinned Comment (engagement question)
+# - Enforced in: metadata_engine.py (structure), METADATA_TEMPLATE.md (spec).

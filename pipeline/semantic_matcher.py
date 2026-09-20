@@ -295,7 +295,7 @@ class SemanticMatcher:
         self.context_seconds = float(context_seconds)
         self.cooldown = int(cooldown)
         self.entity_cooldown = int(entity_cooldown)
-        self.default_entity = (default_entity or "").lower() or None
+        self.default_entity = (default_entity or "").lower().replace("_", " ") or None
         self.partial_threshold = float(partial_threshold)
 
         if not index.idf:
@@ -352,6 +352,7 @@ class SemanticMatcher:
         reach = max(1e-6, pad + (end - start))
 
         tokens = Counter()
+        seg_tokens = Counter()  # words spoken inside this segment only
         weights = defaultdict(float)
         for (a, b, txt) in self.script.spans:
             if b <= start - pad or a >= end + pad:
@@ -361,10 +362,17 @@ class SemanticMatcher:
             else:
                 gap = (a - mid) if a > mid else (mid - b)
                 w = max(0.0, 1.0 - gap / reach)
-            for t in tokenize(txt):
+            tw = tokenize(txt)
+            for t in tw:
                 tokens[t] += w
-            for e in self.entities_in(txt):
-                weights[e] = max(weights[e], w)
+            # Entity inference is strictly segment-scoped: a name from a
+            # neighbouring segment must not make its assets eligible here
+            # (that caused Diana/Doria pictures on Meghan lines).
+            if b > start and a < end:
+                for t in tw:
+                    seg_tokens[t] += w
+                for e in self.entities_in(txt):
+                    weights[e] = max(weights[e], 1.0)
 
         if not tokens and self.script.spans:
             nearest = min(self.script.spans, key=lambda s: abs(s[0] - start))
@@ -385,7 +393,10 @@ class SemanticMatcher:
             total = sum(self.idf_of(t) for t in want)
             if total <= 0:
                 continue
-            frac = sum(self.idf_of(t) for t in want if t in tokens) / total
+            # Partial overlap is scored against the segment's own words only, so a
+            # name spoken in a neighbouring segment cannot leak in via the
+            # padded context tokens.
+            frac = sum(self.idf_of(t) for t in want if t in seg_tokens) / total
             if frac >= self.partial_threshold:
                 weights[entity] = max(weights[entity], frac * 0.9)
 

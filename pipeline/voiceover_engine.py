@@ -6,6 +6,7 @@ Supports:
 """
 
 import os, sys, time, json, urllib.request, subprocess, asyncio
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -47,12 +48,34 @@ class VoiceoverEngine:
                 chunks.append("\n\n".join(curr))
         return chunks
 
-    def download_audio(self, url, out_path):
-        req = urllib.request.Request(url, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            content = resp.read()
-            with open(out_path, "wb") as f:
-                f.write(content)
+    def download_audio(self, url, out_path, extra_headers=None):
+        # Linux-port hardening (2026-09-20): ai33pro's CDN truncates plain
+        # urllib reads from this network (IncompleteRead). Stream via
+        # requests with retries + Range resume instead.
+        headers = {"User-Agent": UA}
+        if extra_headers:
+            headers.update(extra_headers)
+        for attempt in range(4):
+            try:
+                start = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+                h = dict(headers)
+                if start:
+                    h["Range"] = f"bytes={start}-"
+                with requests.get(url, headers=h, timeout=60, stream=True) as r:
+                    if start and r.status_code == 200:
+                        start = 0  # server ignored Range; restart clean
+                    r.raise_for_status()
+                    mode = "ab" if (start and r.status_code == 206) else "wb"
+                    with open(out_path, mode) as f:
+                        for chunk in r.iter_content(chunk_size=65536):
+                            if chunk:
+                                f.write(chunk)
+                if os.path.getsize(out_path) > 10000:
+                    return
+            except Exception as e:
+                self.log(f"download_audio attempt {attempt + 1}/4 failed: {e}")
+                time.sleep(2 * (attempt + 1))
+        raise Exception(f"download_audio failed after 4 attempts: {url}")
 
     async def _generate_edge_chunk(self, text, voice_name, out_path, rate_str):
         import edge_tts
@@ -156,6 +179,109 @@ class VoiceoverEngine:
         tot_t = time.time() - t0
         self.log(f"Chunk {chunk_idx}/{total_chunks} ai33pro ready in {tot_t:.1f}s ({dur:.1f}s audio, SRT={os.path.exists(srt_path)}).")
         return chunk_idx, mp3_path, c_words, dur, tot_t
+
+    def process_chunk_famespeak(self, text, chunk_idx, total_chunks, voice_chunks_dir):
+        """FameSpeak ElevenLabs TTS (temporary provider while ai33pro credits
+        are exhausted). Submits JSON, polls the statusUrl, downloads MP3.
+        The API returns the bare ElevenLabs voice ID (no 'elevenlabs_'
+        prefix) and provides no word timestamps, so the word-level SRT for
+        RULE 6 is produced afterwards by local forced alignment
+        (faster-whisper) over the merged voiceover."""
+        import requests
+        mp3_path = os.path.join(voice_chunks_dir, f"chunk_{chunk_idx:03d}.mp3")
+        c_words = len(text.split())
+        if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 10000:
+            dur = self.get_duration(mp3_path)
+            self.log(f"Chunk {chunk_idx}/{total_chunks} cached ({dur:.1f}s).")
+            return chunk_idx, mp3_path, c_words, dur, 0.0
+
+        t0 = time.time()
+        base = (self.base_url or "https://famespeak.online").rstrip("/")
+        # FameSpeak needs the bare ElevenLabs voice ID, e.g. the configured
+        # "elevenlabs_SAz9YHcvj6GT2YYXdXww" becomes "SAz9YHcvj6GT2YYXdXww".
+        vid = (self.voice_id or "").replace("elevenlabs_", "")
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        job_id = status_url = None
+        for attempt in range(8):
+            try:
+                r = requests.post(
+                    f"{base}/api/v1/eleven-labs/generations",
+                    headers=headers,
+                    json={"voiceId": vid, "text": text},
+                    timeout=90,
+                )
+                if r.status_code == 429:
+                    time.sleep(5.0 + attempt * 5.0); continue
+                if r.status_code == 202:
+                    j = r.json()
+                    job_id, status_url = j.get("id"), j.get("statusUrl")
+                    if job_id and status_url: break
+                else:
+                    self.log(f"Chunk {chunk_idx} submit HTTP {r.status_code}: {r.text[:120]}")
+                    time.sleep(min(60.0, 4.0 + attempt * 4.0))
+            except Exception as e:
+                self.log(f"Chunk {chunk_idx} submit retry {attempt+1}: {e}")
+                time.sleep(min(60.0, 4.0 + attempt * 4.0))
+        if not job_id:
+            raise Exception(f"famespeak chunk {chunk_idx} submit failed after retries")
+
+        # Poll the statusUrl until COMPLETED.
+        audio_rel = None
+        for _ in range(120):  # up to ~10 min per chunk
+            time.sleep(5.0)
+            try:
+                pr = requests.get(f"{base}{status_url}", headers=headers, timeout=30)
+                if pr.status_code != 200:
+                    continue
+                pj = pr.json()
+                st = (pj.get("status") or "").upper()
+                if st == "COMPLETED":
+                    audio_rel = pj.get("audioUrl")
+                    break
+                if st in ("FAILED", "ERROR"):
+                    raise Exception(f"famespeak job {job_id} status={st}: {pj.get('error')}")
+            except Exception:
+                time.sleep(2.0); continue
+        if not audio_rel:
+            raise Exception(f"famespeak chunk {chunk_idx} never completed")
+
+        self.download_audio(f"{base}{audio_rel}", mp3_path,
+                            extra_headers={"Authorization": f"Bearer {self.api_key}"})
+        dur = self.get_duration(mp3_path)
+        tot_t = time.time() - t0
+        self.log(f"Chunk {chunk_idx}/{total_chunks} famespeak ready in {tot_t:.1f}s ({dur:.1f}s audio).")
+        return chunk_idx, mp3_path, c_words, dur, tot_t
+
+    def _transcribe_word_srt(self, mp3_path, srt_path):
+        """Local word-level alignment for the FameSpeak provider (which has
+        no transcript API): faster-whisper with word timestamps over the
+        merged voiceover, written as a word-level SRT for RULE 6."""
+        from faster_whisper import WhisperModel
+        self.log("FameSpeak provides no word timestamps; aligning locally with faster-whisper...")
+        # Prefer a locally pre-downloaded model (the sandbox proxy breaks
+        # huggingface_hub's downloader); fall back to the HF hub id.
+        model_ref = os.environ.get(
+            "FAMESPEAK_WHISPER_MODEL",
+            os.path.expanduser("~/workspace/royal/models/faster-whisper-base"),
+        )
+        if not os.path.isdir(model_ref):
+            model_ref = "base"
+        model = WhisperModel(model_ref, device="cpu", compute_type="int8")
+        segments, _info = model.transcribe(mp3_path, word_timestamps=True,
+                                           language="en", beam_size=5)
+        def ts(s):
+            h = int(s // 3600); m = int((s % 3600) // 60)
+            sec = int(s % 60); ms = int(round((s - int(s)) * 1000))
+            return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+        n = 0
+        with open(srt_path, "w", encoding="utf-8") as f:
+            for seg in segments:
+                for w in (seg.words or []):
+                    n += 1
+                    f.write(f"{n}\n{ts(w.start)} --> {ts(w.end)}\n{w.word.strip()}\n\n")
+        self.log(f"Word-level SRT written: {srt_path} ({n} words).")
+        return n
 
     def process_chunk_omnivoice(self, text, chunk_idx, total_chunks, voice_chunks_dir, ref_voice=None):
         mp3_path = os.path.join(voice_chunks_dir, f"chunk_{chunk_idx:03d}.mp3")
@@ -324,6 +450,16 @@ class VoiceoverEngine:
                 for future in as_completed(futures):
                     idx, mp3_p, c_words, dur, tot_t = future.result()
                     results[idx] = {"chunk": idx, "path": mp3_p, "words": c_words, "audio_seconds": dur, "api_latency_sec": round(tot_t, 2)}
+        elif self.provider == "famespeak":
+            self.log(f"Using FameSpeak ElevenLabs TTS (Voice: {self.voice_id}) -> word SRT via local alignment.")
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {
+                    pool.submit(self.process_chunk_famespeak, c, i, len(chunks), voice_chunks_dir): i
+                    for i, c in enumerate(chunks, 1)
+                }
+                for future in as_completed(futures):
+                    idx, mp3_p, c_words, dur, tot_t = future.result()
+                    results[idx] = {"chunk": idx, "path": mp3_p, "words": c_words, "audio_seconds": dur, "api_latency_sec": round(tot_t, 2)}
         elif self.provider == "omnivoice":
             self.log("Using Local OmniVoice Studio (RTX 3070 Ti GPU) -> 0 CREDITS CONSUMED (100% FREE FOREVER)!")
             for i, c in enumerate(chunks, 1):
@@ -391,6 +527,13 @@ class VoiceoverEngine:
             self.log(f"Merged SRT written to {srt_out}")
         else:
             self.log("No per-chunk SRTs found; skipping SRT merge.")
+        if self.provider == "famespeak":
+            # FameSpeak has no transcript API: build the RULE 6 word-level SRT
+            # by local alignment over the merged voiceover.
+            try:
+                self._transcribe_word_srt(output_mp3, srt_out)
+            except Exception as e:
+                self.log(f"WARNING: local word alignment failed ({e}); continuing without word SRT.")
         vo_mins = total_vo_dur / 60.0
         total_tts_time = time.time() - t_start
         

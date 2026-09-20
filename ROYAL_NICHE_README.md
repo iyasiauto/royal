@@ -32,7 +32,8 @@ would only recycle prior videos' pooled footage.
   - `assets_fresh/images/{entity,scene}/*.jpg` (Serper.dev, script-aware)
   - `assets_fresh/clips/comp_*.mp4` (competitor YouTube, shot-sliced, stabilised)
   - `<Title>.mp4` — final 1920×1080 30 fps H.264 export (350–450 MB / 30 min)
-  - `YOUTUBE_METADATA_<title>.txt` (title alts, description, chapters, tags)
+  - `YOUTUBE_METADATA_<title>.txt` (RULE 40: 3 improved titles, short description + disclaimer, chapters, hashtags, tags, pinned comment)
+  - `thumbnail_1.jpg` / `thumbnail_2.jpg` — 1280×720 ultra-realistic thumbnails per RULE 39 (see pipeline/THUMBNAIL_TEMPLATES.md)
 
 Typical wall clock for a 30-min video: **10–13 min end-to-end** (TTS ~2m,
 timeline ~1m, render ~5m, concat+mux ~2m).
@@ -163,7 +164,7 @@ config JSON.
 | `kb_jitter.py` | Measure per-frame jitter (dx/dy sd, px) for QC |
 | `index_retriever.py` | Wrapper for the D:\ V3 semantic index (optional secondary asset source) |
 | `subtitle_formatter.py` | SRT → styled ASS (used only when RULE 8 flipped to burn subtitles) |
-| `metadata_engine.py` | Generates YouTube title / description / chapter file |
+| `metadata_engine.py` | Generates YouTube title / description / chapter file (RULE 40 structure) |
 | `assets/grids/`, `assets/sparkle-backgrounds/` | Backdrop libraries for cards + framed clips |
 
 ---

@@ -179,7 +179,8 @@ class TimelineEngine:
     def build_matcher(self, vo_duration, lead):
         """Construct a semantic asset matcher index over the script text."""
         index = AssetIndex()
-        default_entity = (self.cfg.get("default_entity") or "").lower() or None
+        default_entity = ((self.cfg.get("default_entity") or "")
+                          .lower().replace("_", " ")) or None
 
         # An asset directory is either a generic pool (label everything with the
         # documentary's own subject) or a subject folder (label by folder name).

@@ -94,6 +94,12 @@ class RenderEngine:
         self.opening_volume = float(opening_volume)
         self.limiter_ceiling = float(limiter_ceiling) if limiter_ceiling else 0.0
         self.hwaccel = hwaccel
+        # Linux-port (2026-09-20): CPU-only box, no NVIDIA GPU. When a
+        # software encoder is selected, drop CUDA hwaccel and NVENC-only
+        # flags everywhere (segments, concat).
+        self.cpu_mode = (encoder != "h264_nvenc")
+        if self.cpu_mode:
+            self.hwaccel = "none"
 
         self.look = looks_module.resolve(look, look_overrides)
         self.fade_s = float(self.look.get("fade_s") or 0.25)
@@ -119,7 +125,17 @@ class RenderEngine:
 
     # ----------------------------------------------------------- filtergraph
 
+    def _decode_args(self):
+        """Extra ffmpeg input flags for HW decode; empty on CPU-only boxes."""
+        return [] if self.hwaccel == "none" else ["-hwaccel", self.hwaccel]
+
     def _gpu_encode_args(self):
+        if self.cpu_mode:
+            # Plain software encode: NVENC-only flags (-preset pX, -rc vbr,
+            # -b:v CBR ladder) are invalid for libx264.
+            return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(self.fps), "-an"]
         return ["-c:v", self.encoder, "-preset", self.preset, "-rc", "vbr",
                 "-b:v", self.bitrate, "-maxrate", self.maxrate,
                 "-bufsize", self.bufsize, "-pix_fmt", "yuv420p",
@@ -346,7 +362,7 @@ class RenderEngine:
                     f"crop={self.W}:{self.H}",
                     self._fades(dur),
                 )
-                cmd = (["ffmpeg", "-y", "-hwaccel", self.hwaccel, "-ss", "0",
+                cmd = (["ffmpeg", "-y"] + self._decode_args() + ["-ss", "0",
                         "-t", str(dur), "-i", src, "-vf", vf] + gpu + [out_file])
             elif fname.startswith("comp_") and has_backdrops:
                 # Even idx -> grid card look; odd -> sparkle card look.
@@ -391,7 +407,7 @@ class RenderEngine:
                 # (<= its real duration), so a plain -t trim fills the slot with
                 # continuous footage. No -stream_loop: looping a 2-3s clip to a
                 # longer slot created a jump-cut seam every loop that read as shake.
-                cmd = (["ffmpeg", "-y", "-hwaccel", self.hwaccel, "-ss", "0",
+                cmd = (["ffmpeg", "-y"] + self._decode_args() + ["-ss", "0",
                         "-t", str(dur), "-i", src, "-vf", vf] + gpu + [out_file])
         else:
             return idx, out_file, False, 0.0, f"unknown segment type: {stype!r}"
@@ -518,16 +534,24 @@ class RenderEngine:
         # RULE 18: switch the FINAL encode to NVENC HQ mode (p5 + cq=21) so
         # the exported file is 30-45% smaller than the fast p1 segments at the
         # same perceived quality.
+        # Linux-port (2026-09-20): CPU fallback uses libx264 CRF instead of
+        # NVENC-only flags.
+        if self.cpu_mode:
+            vcodec = ["-c:v", "libx264", "-preset", "medium", "-crf", "21",
+                      "-profile:v", "high",
+                      "-pix_fmt", "yuv420p",
+                      "-r", str(self.fps), "-an"]
+        else:
+            vcodec = ["-c:v", self.encoder, "-preset", "p5", "-rc", "vbr",
+                      "-cq", "21", "-b:v", "0",
+                      "-maxrate", "4500k", "-bufsize", "9000k",
+                      "-profile:v", "high", "-bf", "3",
+                      "-spatial-aq", "1", "-aq-strength", "8",
+                      "-pix_fmt", "yuv420p",
+                      "-r", str(self.fps), "-an"]
         res = subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt,
-             "-c:v", self.encoder, "-preset", "p5", "-rc", "vbr",
-             "-cq", "21", "-b:v", "0",
-             "-maxrate", "4500k", "-bufsize", "9000k",
-             "-profile:v", "high", "-bf", "3",
-             "-spatial-aq", "1", "-aq-strength", "8",
-             "-pix_fmt", "yuv420p",
-             "-r", str(self.fps), "-an",
-             silent_path],
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt]
+            + vcodec + [silent_path],
             capture_output=True, text=True, errors="replace")
         if res.returncode != 0:
             raise RuntimeError(f"Concat failed:\n{res.stderr[-2000:]}")
