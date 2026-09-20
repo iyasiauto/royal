@@ -1,0 +1,45 @@
+{
+  "_comment": "Video 10 — Harry & Meghan secret documentary UK. Pool merge V2-V9 (rules 30/31 purge) + fresh Serper + new competitor.",
+
+  "clips_dir": "C:\\Users\\ninja\\Downloads\\X Colab Automation\\Royal\\Video 10 (Harry & Meghan FLEEING Back to USA After SECRET UK Documentary Shoot Gets Them BANNED!)\\assets_fresh\\clips",
+  "images_dir": "C:\\Users\\ninja\\Downloads\\X Colab Automation\\Royal\\Video 10 (Harry & Meghan FLEEING Back to USA After SECRET UK Documentary Shoot Gets Them BANNED!)\\assets_fresh\\images",
+  "grid_dir": "C:\\Users\\ninja\\Downloads\\X Colab Automation\\Royal\\Video 10 (Harry & Meghan FLEEING Back to USA After SECRET UK Documentary Shoot Gets Them BANNED!)\\assets_fresh\\images",
+  "bgm": "C:\\Users\\ninja\\Downloads\\Dolly Parton\\Bg music\\Til Death Parts Us - Aakash Gandhi.mp3",
+
+  "default_entity": "prince_harry",
+  "entity_root": "C:\\Users\\ninja\\Downloads\\X Colab Automation\\Royal\\Video 10 (Harry & Meghan FLEEING Back to USA After SECRET UK Documentary Shoot Gets Them BANNED!)\\assets_fresh\\images",
+  "entity_root_skip": [],
+
+  "opening_lead_s": 0.0,
+  "min_image_px": 720,
+  "min_image_bytes": 60000,
+
+  "render": {
+    "zoomPerSec": 0.010,
+    "staticShare": 0.17,
+    "panShare": 0.08
+  },
+
+  "burn_subtitles": false,
+
+  "tts": "ai33pro",
+  "tts_base_url": "https://api.ai33.pro",
+  "voice_id": "elevenlabs_SAz9YHcvj6GT2YYXdXww",
+  "speed": 0.95,
+  "vo_volume": 2.10,
+  "bgm_volume": 0.10,
+
+  "topic_asset_weight": 8,
+  "triptych_count": 8,
+  "grid_card_count": 15,
+  "sparkle_card_count": 18,
+  "exclude_keywords": ["watermark", "getty", "alamy", "stock", "shutterstock", "preview", "vector", "123rf", "depositphotos", "adobestock"],
+
+  "clip_groups": [],
+  "split_cards": [],
+  "headlines": [],
+  "quotes": [],
+
+  "entity_boost": 25.0,
+  "clip_cooldown": 10
+}

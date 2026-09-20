@@ -1,0 +1,52 @@
+# Credentials / secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.key
+*credentials*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Per-video downloaded assets (Serper images, competitor sources, sliced clips)
+# — thousands of files, gigabytes, mostly copyrighted upstream, always
+# reproducible by running the pipeline.
+Video */assets_fresh/
+Video */temp_render_workspace/
+Video */qc/
+Video */YOUTUBE_METADATA_*.txt
+Video */*.mp4
+Video */*.webp
+Video */*.jpg
+Video */*.png
+Video */*.gif
+Video */voiceover.mp3
+Video */voiceover.srt
+Video */voiceover.ass
+Video */voice_manifest.json
+
+# Legacy loose asset roots at the project root (superseded by per-video pools)
+royal_clips/
+royal_images/
+
+# Scratchpads, temp files, editor droppings
+*.tmp
+*.log
+tmp*.tmp*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Node (if any tooling lands later)
+node_modules/
+
+# Pipeline runtime outputs
+pipeline/temp_*/
+pipeline/_tc_scan.log

@@ -1,0 +1,41 @@
+{
+  "_comment": "Topic config for Royal Documentary niche (King Charles, Queen Camilla, Prince William, Royal Family).",
+
+  "clips_dir": "C:\\Users\\ninja\\Downloads\\X Colab Automation\\Royal\\royal_clips",
+  "images_dir": "C:\\Users\\ninja\\Downloads\\X Colab Automation\\Royal\\royal_images",
+  "grid_dir": "C:\\Users\\ninja\\Downloads\\X Colab Automation\\Royal\\royal_images",
+  "bgm": "C:\\Users\\ninja\\Downloads\\Dolly Parton\\Bg music\\Dreamland - Aakash Gandhi.mp3",
+
+  "default_entity": "king charles",
+  "entity_root": "C:\\Users\\ninja\\Downloads\\X Colab Automation\\Royal\\royal_images",
+  "entity_root_skip": [],
+
+  "opening_lead_s": 0.0,
+  "min_image_px": 720,
+  "min_image_bytes": 60000,
+
+  "render": {
+    "zoomPerSec": 0.010,
+    "staticShare": 0.17,
+    "panShare": 0.08
+  },
+
+  "burn_subtitles": false,
+
+  "tts": "ai33pro",
+  "tts_base_url": "https://api.ai33.pro",
+  "voice_id": "elevenlabs_SAz9YHcvj6GT2YYXdXww",
+  "speed": 0.95,
+  "vo_volume": 2.10,
+
+  "topic_asset_weight": 8,
+  "triptych_count": 8,
+  "grid_card_count": 15,
+  "sparkle_card_count": 18,
+  "exclude_keywords": ["watermark", "getty", "alamy", "stock", "shutterstock", "preview", "vector", "123rf", "depositphotos", "adobestock"],
+
+  "clip_groups": [],
+  "split_cards": [],
+  "headlines": [],
+  "quotes": []
+}
