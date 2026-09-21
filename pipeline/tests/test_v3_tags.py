@@ -135,5 +135,31 @@ class TestTier0V3(unittest.TestCase):
         self.assertTrue(os.path.basename(asset.path).startswith("v3_"))
 
 
+class TestDefaultTagFiles(unittest.TestCase):
+    """Regression: default_tag_files() must resolve to the shipped repo tags
+    on every OS. It previously used config.PIPELINE_DIR (a hardcoded Windows
+    path), so on Linux the tag files silently failed to load and Tier-0
+    person matching never fired in production."""
+
+    def test_default_tag_files_exist_in_repo(self):
+        import pipeline as P
+        files = P.default_tag_files()
+        self.assertEqual(len(files), 2)
+        for p in files:
+            self.assertTrue(os.path.isabs(p), p)
+            self.assertTrue(os.path.exists(p), f"default tag file missing: {p}")
+            self.assertTrue(
+                os.path.dirname(p).endswith("configs"),
+                f"not under repo configs/: {p}")
+
+    def test_load_all_tags_picks_up_defaults(self):
+        import pipeline as P
+        tags = P.load_all_tags(None)
+        self.assertGreater(len(tags), 3000,
+                           "default tag files did not load — Tier-0 is dead")
+        self.assertTrue(any(k.startswith("v3_") for k in tags))
+        self.assertTrue(any(k.startswith("comp_") for k in tags))
+
+
 if __name__ == "__main__":
     unittest.main()

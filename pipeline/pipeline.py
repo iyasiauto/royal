@@ -230,8 +230,11 @@ def default_tag_files():
     under any user-supplied --asset-tags / cfg["asset_tags"] file, which wins
     on key conflicts. Missing files are silently skipped by load_tags, so
     checkouts without the corpora keep working.
+    Tag paths resolve from this file's own directory (not
+    config.PIPELINE_DIR, which is a Windows-only path) so the shipped tags
+    load on every platform.
     """
-    base = os.path.join(str(config.PIPELINE_DIR), "configs")
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
     return [os.path.join(base, n)
             for n in ("clip_tags.json", "clip_tags_v3.json")]
 
