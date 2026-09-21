@@ -222,6 +222,50 @@ def parse_args():
     return p.parse_args()
 
 
+def default_tag_files():
+    """RULE 41: person/topic clip tags ship with the repo and load by default.
+
+    configs/clip_tags.json (hand-tagged pool clips) and
+    configs/clip_tags_v3.json (V3 Semantic Visual Index corpus) are merged
+    under any user-supplied --asset-tags / cfg["asset_tags"] file, which wins
+    on key conflicts. Missing files are silently skipped by load_tags, so
+    checkouts without the corpora keep working.
+    """
+    base = os.path.join(str(config.PIPELINE_DIR), "configs")
+    return [os.path.join(base, n)
+            for n in ("clip_tags.json", "clip_tags_v3.json")]
+
+
+def load_all_tags(explicit):
+    merged = {}
+    for path in default_tag_files():
+        merged.update(load_tags(path))
+    merged.update(load_tags(explicit))
+    return merged
+
+
+def make_channel_badge(cfg, work_dir):
+    """RULE 45: channel badge — generated once per video into the work dir.
+
+    Off by default (user-deferred; STYLE_DEFAULTS["watermark"] is False and
+    the fallback here is False since topic configs do not merge
+    STYLE_DEFAULTS). Code retained: opt in per project with
+    "watermark": true in the topic config.
+    Returns (want_watermark, channel_name, badge_path).
+    """
+    badge_path = None
+    want_watermark = bool(cfg.get("watermark", False))
+    channel_name = cfg.get("channel_name") or "ROYAL INSIDER"
+    if want_watermark:
+        from style.watermark import make_badge
+        badge_path = os.path.join(work_dir, "badge.png")
+        if not os.path.exists(badge_path):
+            make_badge(channel_name, badge_path,
+                       size=int(cfg.get("badge_source_px", 200)))
+        log(f"Channel badge: {channel_name} -> {os.path.basename(badge_path)}")
+    return want_watermark, channel_name, badge_path
+
+
 def main():
     args = parse_args()
     cfg = load_topic_config(args.topic_config)
@@ -367,7 +411,7 @@ def main():
         width=width, height=height,
         semantic=not args.no_semantic, script_text=script_text,
         voice_manifest=voice_manifest, srt_path=srt_path, entity_boost=args.entity_boost,
-        asset_tags=load_tags(args.asset_tags or cfg.get("asset_tags")))
+        asset_tags=load_all_tags(args.asset_tags or cfg.get("asset_tags")))
     timeline_json = os.path.join(work_dir, "timeline.json")
     timeline = tl_engine.build_timeline(timeline_duration, opening_clip, timeline_json)
     log(f"Stage 2 done in {time.time() - t0:.1f}s")
@@ -397,17 +441,11 @@ def main():
         else:
             log("Captions off (burn_subtitles disabled).")
 
-        # RULE 45: channel badge — generated once per video into the work dir.
-        badge_path = None
-        want_watermark = bool(cfg.get("watermark", True))
-        channel_name = cfg.get("channel_name") or "ROYAL INSIDER"
-        if want_watermark:
-            from style.watermark import make_badge
-            badge_path = os.path.join(work_dir, "badge.png")
-            if not os.path.exists(badge_path):
-                make_badge(channel_name, badge_path,
-                           size=int(cfg.get("badge_source_px", 200)))
-            log(f"Channel badge: {channel_name} -> {os.path.basename(badge_path)}")
+        # RULE 45: channel badge — generated once per video into the work
+        # dir. Off by default (user-deferred); opt in per project with
+        # "watermark": true in the topic config.
+        want_watermark, channel_name, badge_path = make_channel_badge(
+            cfg, work_dir)
 
         # RULE 46: mark commentator/quote segments for the panel treatment.
         if cfg.get("commentator_panel", True):

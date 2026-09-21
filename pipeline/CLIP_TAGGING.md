@@ -126,5 +126,51 @@ python run_pipeline.py --config configs/royal_config.json \
     --asset-tags configs/clip_tags.json ...
 ```
 
-(one `--asset-tags` file per run; merge the legacy keyword tags and the
-clip tags into a single JSON if you need both — mixed formats are fine).
+`configs/clip_tags.json` (hand-tagged legacy pool clips) and
+`configs/clip_tags_v3.json` (V3 corpus, below) now also **load by default**
+via `pipeline.load_all_tags()` — an explicit `--asset-tags` / config
+`asset_tags` file is merged on top and wins on key conflicts.
+
+## V3 ingestion: bulk corpora from the Semantic Visual Index (primary path)
+
+For large pre-analysed corpora the approved source of tags is the V3
+Semantic Visual Index, NOT visual re-tagging. The 2026-09-21 ingestion:
+
+- Source: `/tmp/v3db/footage-index3.db`, VIEW `usable_clips` (status
+  `analyzed`, SAFE, confidence 0.6–1.0, mean 0.98) → **3319 clips** from
+  11 source videos (13.78 GB) in Drive folder
+  `1kK0L33dEr8t7PueF7YcMXTGFO_JIX5L7`.
+- Videos downloaded to `~/workspace/royal/v3_corpus/<asset_id>.mp4`
+  (manifest: `v3_corpus/manifest.json`); clips cut with
+  `ffmpeg -ss start -t dur -vf scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080 -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 128k -r 30`
+  into `~/workspace/royal/pool/v3_clips/v3_<asset8>_<clipid8>.mp4`
+  (asset8/clipid8 = first 8 hex chars of the src/clip hash).
+- Tags: `pipeline/configs/clip_tags_v3.json`, keyed by those basenames,
+  `{"persons","topics","clip_type"}`. Persons = normalized union of
+  `primary_subject` + `visible_subjects` (canonical map, e.g.
+  `king charles iii`→`king charles`; combos split on and/,/&;
+  `uncertain:` prefix stripped; non-person tokens dropped —
+  `unknown person`, `crowd`, `royal carriage escort`, `lego figures`, …;
+  named non-core people kept lowercased, never invented).
+  Topics = `[event, location]` lowercased, `"unknown"` dropped.
+  `clip_type` = normalized `shot_type`. 92 distinct persons; top:
+  king charles 1199, queen camilla 1019, princess catherine 961,
+  prince william 940. 62 clips (1.9%) honestly empty.
+- Spot audit: 10 random clips, middle frame viewed, tagged person
+  confirmed visible — see `v3_corpus/spot_audit.md`.
+- Pool wiring: `pool/v3_clips` is a second `clips_dir`
+  (`make_linux_config.py` sets `clips_dir: [pool/clips, pool/v3_clips]`;
+  `_as_dir_list` drops missing dirs). Tags ride the default
+  `load_all_tags()` path — no CLI flags needed.
+- For the NEXT bulk corpus: repeat the same steps (index DB →
+  download → cut → normalize → audit). `clip_tags_v3.json` is the
+  single file the matcher reads; keep its key scheme.
+
+## RULE 49: pipeline-sliced clips (ongoing path)
+
+Clips sliced from competitor videos inside the pipeline
+(`fresh_assets.slice_competitor_clips`) get 7 sample frames +
+a skeleton manifest entry (`<clips_dir>/clip_tags_new.json`,
+`"confidence": "unverified"`, persons seeded only from the video
+config's `default_entity`) at extraction time — see RULE 49 in
+PIPELINE_RULES.md. Nothing enters the pool untagged.

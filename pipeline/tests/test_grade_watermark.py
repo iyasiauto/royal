@@ -7,9 +7,11 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from PIL import Image
 
+from config import STYLE_DEFAULTS
 from style.signature_grade import grade_filter, preview
 from style.watermark import make_badge, watermark_filter
 
@@ -145,6 +147,75 @@ class TestWatermarkFilter(unittest.TestCase):
         self.assertIn("movie=", vf)
         self.assertIn("/tmp/a\\,b/c\\:d.png", vf)
         self.assertNotIn("/tmp/a,b/c:d.png", vf)
+
+
+class TestWatermarkDefaultOff(unittest.TestCase):
+    """Watermark badge is user-deferred: off by default, opt-in per project.
+
+    Code (make_badge) is retained; these tests pin the default-off behaviour
+    of the pipeline's RULE 45 path.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="badge_off_test_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_style_defaults_watermark_is_false(self):
+        self.assertIs(STYLE_DEFAULTS["watermark"], False,
+                      "STYLE_DEFAULTS must default the watermark to off")
+
+    def test_badge_disabled_by_default_no_file_generated(self):
+        # Default (empty) topic config: the badge branch must not run, so
+        # style.watermark.make_badge is never called and no badge.png appears.
+        import pipeline
+        with mock.patch("style.watermark.make_badge") as mk:
+            want, name, path = pipeline.make_channel_badge({}, self.tmp)
+        mk.assert_not_called()
+        self.assertFalse(want, "want_watermark must be False with default cfg")
+        self.assertIsNone(path, "badge_path must stay None when disabled")
+        self.assertEqual(name, "ROYAL INSIDER")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "badge.png")),
+                         "no badge file may be generated when disabled")
+
+    def test_badge_opt_in_still_generates(self):
+        # "watermark": true in the topic config re-enables the badge path.
+        import pipeline
+        cfg = {"watermark": True, "channel_name": "ROYAL INSIDER",
+               "badge_source_px": 200}
+
+        def fake_make_badge(channel_name, out_path, size=200):
+            with open(out_path, "wb") as f:
+                f.write(b"fake-badge")
+            return out_path
+
+        with mock.patch("style.watermark.make_badge",
+                        side_effect=fake_make_badge) as mk:
+            want, name, path = pipeline.make_channel_badge(cfg, self.tmp)
+        self.assertTrue(want, "explicit opt-in must enable the watermark")
+        mk.assert_called_once()
+        called_kwargs = mk.call_args
+        self.assertEqual(called_kwargs.args[0], "ROYAL INSIDER")
+        self.assertEqual(called_kwargs.args[1],
+                         os.path.join(self.tmp, "badge.png"))
+        self.assertEqual(called_kwargs.kwargs.get("size"), 200)
+        self.assertEqual(path, os.path.join(self.tmp, "badge.png"))
+        self.assertTrue(os.path.isfile(path),
+                        "badge file must be generated when opted in")
+
+    def test_existing_badge_is_reused_not_regenerated(self):
+        # A badge.png already in the work dir must not be regenerated.
+        import pipeline
+        existing = os.path.join(self.tmp, "badge.png")
+        with open(existing, "wb") as f:
+            f.write(b"already-here")
+        cfg = {"watermark": True, "channel_name": "ROYAL INSIDER"}
+        with mock.patch("style.watermark.make_badge") as mk:
+            want, name, path = pipeline.make_channel_badge(cfg, self.tmp)
+        mk.assert_not_called()
+        self.assertTrue(want)
+        self.assertEqual(path, existing)
 
 
 class TestPreviewHelper(unittest.TestCase):

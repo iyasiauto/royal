@@ -57,8 +57,10 @@ STYLE_DEFAULTS = {
     # D — signature grade: subtle RGB-split + film grain on the final mux
     "signature_grade": True,
     "grade_grain": 9,
-    # E — channel watermark badge, top-right of every frame
-    "watermark": True,
+    # E — channel watermark badge, top-right of every frame. User-deferred:
+    # off by default; code retained, opt in per project with
+    # "watermark": true in the topic config.
+    "watermark": False,
     "channel_name": "ROYAL INSIDER",
     "badge_display_px": 140,
     "badge_margin_px": 24,

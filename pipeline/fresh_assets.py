@@ -300,8 +300,103 @@ def fetch_images(script_text: str, assets_dir: Path, per_query: int) -> None:
         print(f"  [+] scene[{i}] {phrase!r}: {kept} images")
 
 
+# --- RULE 49: extraction-time auto-tagging -------------------------------------
+# Every freshly sliced competitor clip gets (a) 7 representative frames saved
+# under <clips_dir>/frames/src_<hash>/clip_<hash>/ for later visual
+# classification, and (b) a skeleton entry in <clips_dir>/clip_tags_new.json
+# keyed by the clip's bare filename with "confidence": "unverified". Nothing
+# is ever invented for the persons field - it is seeded only from the video
+# config's default_entity (normalised with semantic_matcher.norm_person) or
+# left empty. Frame sampling / manifest failures must never break clip writing.
+FRAME_FRACTIONS = [0.02, 0.2, 0.35, 0.5, 0.65, 0.8, 0.98]
+FRAME_NAMES = ["0_beg_safe.jpg", "1_early.jpg", "2_first_mid.jpg",
+               "3_middle.jpg", "4_second_mid.jpg", "5_late.jpg",
+               "6_end_safe.jpg"]
+NEW_TAGS_MANIFEST = "clip_tags_new.json"
+
+
+def _sha16(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def sample_clip_frames(clip_path: Path, clip_dur_s: float,
+                       frames_dir: Path) -> int:
+    """Grab representative frames from a freshly sliced clip.
+
+    Returns the number of frames actually written. Any ffmpeg failure is a
+    warning only - the caller must keep going.
+    """
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    ok = 0
+    for frac, name in zip(FRAME_FRACTIONS, FRAME_NAMES):
+        out = frames_dir / name
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-ss", f"{frac * clip_dur_s:.3f}",
+                 "-i", str(clip_path),
+                 "-frames:v", "1", "-q:v", "3",
+                 "-loglevel", "error", str(out)],
+                capture_output=True, text=True)
+        except OSError as e:
+            print(f"[fresh] WARN: frame sampling failed for {clip_path.name}: {e}")
+            continue
+        if r.returncode != 0 or not out.exists():
+            print(f"[fresh] WARN: frame sampling failed for {clip_path.name} "
+                  f"at t={frac * clip_dur_s:.3f}s")
+            continue
+        ok += 1
+    return ok
+
+
+def upsert_new_tag_manifest(clips_dir: Path, clip_name: str, src_id: str,
+                            frames_dir_rel: str, persons: list) -> None:
+    """Append/upsert the RULE 49 skeleton entry for one clip.
+
+    Never raises: a bad manifest is logged, never fatal.
+    """
+    manifest_path = clips_dir / NEW_TAGS_MANIFEST
+    try:
+        if manifest_path.exists():
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        else:
+            data = {}
+        data[clip_name] = {
+            "src": src_id,
+            "frames_dir": frames_dir_rel,
+            "persons": list(persons),
+            "topics": [],
+            "clip_type": "other",
+            "confidence": "unverified",
+        }
+        manifest_path.write_text(
+            json.dumps(data, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8")
+    except (OSError, ValueError) as e:
+        print(f"[fresh] WARN: could not update {NEW_TAGS_MANIFEST}: {e}")
+
+
+def tag_extracted_clip(competitor_mp4: Path, clips_dir: Path,
+                       clip_path: Path, clip_dur_s: float,
+                       default_entity: str | None) -> None:
+    """RULE 49 bookkeeping for one freshly written clip: sample frames and
+    upsert its skeleton manifest entry. Warnings only, never raises."""
+    from semantic_matcher import norm_person
+    src_id = f"src_{_sha16(str(competitor_mp4))}"
+    clip_id = f"clip_{_sha16(str(clip_path))}"
+    frames_dir = clips_dir / "frames" / src_id / clip_id
+    seed_persons = [norm_person(default_entity)] if default_entity else []
+    sample_clip_frames(clip_path, clip_dur_s, frames_dir)
+    upsert_new_tag_manifest(
+        clips_dir, clip_path.name, src_id,
+        f"frames/{src_id}/{clip_id}", seed_persons)
+# --- end RULE 49 --------------------------------------------------------------
+
+
 def slice_competitor_clips(competitor_mp4: Path, clips_dir: Path,
-                           min_s: float = 3.5, max_s: float = 6.0) -> int:
+                           min_s: float = 3.5, max_s: float = 6.0,
+                           default_entity: str | None = None) -> int:
     """Shot-detect competitor video, then cut 1.5-3.0s excerpts around each detected scene."""
     from scenedetect import open_video, SceneManager
     from scenedetect.detectors import ContentDetector
@@ -336,6 +431,13 @@ def slice_competitor_clips(competitor_mp4: Path, clips_dir: Path,
             capture_output=True, text=True)
         if r.returncode == 0 and out.exists() and out.stat().st_size > 20000:
             written += 1
+            # RULE 49: sample frames + upsert skeleton manifest for the clip.
+            # Warnings only; a tagging failure must never break clip writing.
+            try:
+                tag_extracted_clip(competitor_mp4, clips_dir, out, e - s,
+                                   default_entity)
+            except Exception as e2:
+                print(f"[fresh] WARN: RULE 49 tagging failed for {out.name}: {e2}")
     print(f"[fresh] wrote {written} competitor clips into {clips_dir}")
     return written
 
@@ -345,6 +447,9 @@ def main():
     ap.add_argument("--script", required=True)
     ap.add_argument("--assets-dir", required=True)
     ap.add_argument("--competitor-video", help="Path to already-downloaded competitor mp4")
+    ap.add_argument("--default-entity",
+                    help="Default entity for RULE 49 persons pre-seeding "
+                         "(e.g. 'meghan markle'; normally from the video config)")
     ap.add_argument("--images-per-query", type=int, default=30)
     ap.add_argument("--skip-images", action="store_true")
     ap.add_argument("--skip-clips", action="store_true")
@@ -360,7 +465,8 @@ def main():
     if args.competitor_video and not args.skip_clips:
         p = Path(args.competitor_video)
         if p.exists():
-            slice_competitor_clips(p, assets / "clips")
+            slice_competitor_clips(p, assets / "clips",
+                                   default_entity=args.default_entity)
         else:
             print(f"[fresh] WARN: competitor mp4 not found: {p}")
 

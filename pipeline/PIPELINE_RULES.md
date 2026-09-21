@@ -323,3 +323,25 @@
 # ("Edit pass (B+G+H): N segments, K holds split, X% static runtime, ...").
 # - Enforced in: timeline_engine.py (_renumber_for_motion, _static_share).
 #   Tests: tests/test_pacing_guard.py.
+
+## RULE 49: Tag at Extraction — No Video-Sliced Clip Enters the Pool Untagged
+# Every clip sliced from a competitor/source video gets, at extraction time:
+# (a) 7 representative frames sampled into
+# <clips_dir>/frames/src_<sha16(video)>/clip_<sha16(clip)>/ using the fixed
+# scheme 0_beg_safe, 1_early, 2_first_mid, 3_middle, 4_second_mid, 5_late,
+# 6_end_safe.jpg (fractions 0.02/0.20/0.35/0.50/0.65/0.80/0.98); (b) a skeleton
+# entry in <clips_dir>/clip_tags_new.json keyed by the clip's bare filename:
+# {"src":..., "frames_dir":..., "persons":[...], "topics":[],
+# "clip_type":"other", "confidence":"unverified"}. The persons field is seeded
+# ONLY from the video config's default_entity (normalised via
+# semantic_matcher.norm_person) or left empty - never invented. Frame
+# sampling / manifest failures are warnings only and must never break clip
+# writing. A clip's tags are finalised by visual classification of its 7
+# frames (V3 Semantic Visual Index is the approved bulk source); the merged
+# result ships as configs/clip_tags_v3.json keyed by
+# v3_<asset8>_<clipid8>.mp4 and loads by default alongside
+# configs/clip_tags.json (pipeline.load_all_tags). Bulk corpora: see
+# CLIP_TAGGING.md "V3 ingestion".
+# - Enforced in: fresh_assets.py (slice_competitor_clips, tag_extracted_clip,
+#   sample_clip_frames, upsert_new_tag_manifest; --default-entity flag).
+#   Tests: tests/test_extraction_tags.py.
