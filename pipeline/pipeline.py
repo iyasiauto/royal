@@ -225,18 +225,20 @@ def parse_args():
 def default_tag_files():
     """RULE 41: person/topic clip tags ship with the repo and load by default.
 
-    configs/clip_tags.json (hand-tagged pool clips) and
-    configs/clip_tags_v3.json (V3 Semantic Visual Index corpus) are merged
-    under any user-supplied --asset-tags / cfg["asset_tags"] file, which wins
-    on key conflicts. Missing files are silently skipped by load_tags, so
-    checkouts without the corpora keep working.
+    configs/clip_tags.json (hand-tagged pool clips),
+    configs/clip_tags_v3.json (V3 Semantic Visual Index corpus) and
+    configs/clip_tags_v20.json (Video 20 YouTube-sourced clips, RULE 49)
+    are merged under any user-supplied --asset-tags / cfg["asset_tags"]
+    file, which wins on key conflicts. Missing files are silently skipped
+    by load_tags, so checkouts without the corpora keep working.
     Tag paths resolve from this file's own directory (not
     config.PIPELINE_DIR, which is a Windows-only path) so the shipped tags
     load on every platform.
     """
     base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
     return [os.path.join(base, n)
-            for n in ("clip_tags.json", "clip_tags_v3.json")]
+            for n in ("clip_tags.json", "clip_tags_v3.json",
+                      "clip_tags_v20.json")]
 
 
 def load_all_tags(explicit):

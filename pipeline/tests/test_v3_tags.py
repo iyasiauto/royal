@@ -101,6 +101,20 @@ class TestTagFilesLoad(unittest.TestCase):
         # The vast majority of V3 clips must carry a person tag.
         self.assertGreater(n_persons / len(tags), 0.95)
 
+    def test_clip_tags_v20_json_schema(self):
+        # V20 YouTube-sourced clips (RULE 49): keys are v20_<videoid>_<s>_<e>.mp4
+        tags = self._load("clip_tags_v20.json")
+        self.assertGreater(len(tags), 0)
+        for key, val in tags.items():
+            self.assertTrue(key.startswith("v20_") and key.endswith(".mp4"), key)
+            self.assertIsInstance(val, dict)
+            self.assertIn("persons", val)
+            self.assertTrue(all(p == p.lower() for p in val["persons"]),
+                            f"not lowercase: {key}")
+            self.assertFalse(any("unknown" in p or "uncertain" in p
+                                 for p in val["persons"]), key)
+            self.assertEqual(val.get("confidence"), "unverified", key)
+
     def test_both_files_apply_to_matcher(self):
         idx = AssetIndex()
         v3_tags = self._load("clip_tags_v3.json")
@@ -144,7 +158,7 @@ class TestDefaultTagFiles(unittest.TestCase):
     def test_default_tag_files_exist_in_repo(self):
         import pipeline as P
         files = P.default_tag_files()
-        self.assertEqual(len(files), 2)
+        self.assertEqual(len(files), 3)
         for p in files:
             self.assertTrue(os.path.isabs(p), p)
             self.assertTrue(os.path.exists(p), f"default tag file missing: {p}")
