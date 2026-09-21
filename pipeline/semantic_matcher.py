@@ -81,10 +81,65 @@ def folder_entity(dir_path):
     return " ".join(parts)
 
 
+# Clip-type vocabulary for the structured clip tags (see CLIP_TAGGING.md).
+CLIP_TYPES = {"interview", "redcarpet", "paparazzi", "talkshow", "engagement",
+              "other"}
+
+
+def norm_person(name):
+    """Canonical person key: lowercase, underscores to spaces, single spaces.
+
+    Used for "persons" tag values and for comparing them against the entity
+    phrases the matcher detects in narration - both sides must agree exactly.
+    """
+    return re.sub(r"\s+", " ", str(name).lower().replace("_", " ").strip())
+
+
+def _as_list(value):
+    """A tag value that may be a single string, a list, or absent."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
+def _parse_tag_value(values):
+    """Split one tag-file entry into (persons, topics, clip_type, tokens).
+
+    Accepts the legacy keyword list (or a bare string) and the structured
+    dict {"persons": [...], "topics": [...], "clip_type": "..."}; both may be
+    mixed in one file. Person names become canonical person keys; topic
+    keywords are tokenised into the asset's token set as well, so plain
+    IDF scoring can see them too.
+    """
+    persons, topics, clip_type, extra = set(), set(), None, set()
+    if isinstance(values, dict):
+        for p in _as_list(values.get("persons")):
+            p = norm_person(p)
+            if p:
+                persons.add(p)
+                extra.update(tokenize(p))
+        for t in _as_list(values.get("topics")):
+            phrase = norm_person(t)
+            if phrase:
+                topics.add(phrase)
+                extra.update(tokenize(t))
+        ct = values.get("clip_type")
+        if isinstance(ct, str) and ct.strip():
+            ct = ct.strip().lower()
+            clip_type = ct if ct in CLIP_TYPES else "other"
+    else:
+        for v in _as_list(values):
+            extra.update(tokenize(v))
+    return persons, topics, clip_type, extra
+
+
 class Asset:
     """One photo or clip plus everything known about what it depicts."""
 
-    __slots__ = ("path", "kind", "entity", "entity_tokens", "tokens", "source_id")
+    __slots__ = ("path", "kind", "entity", "entity_tokens", "tokens",
+                 "source_id", "persons", "topics", "clip_type")
 
     def __init__(self, path, kind, entity, tokens, source_id):
         self.path = path
@@ -93,6 +148,11 @@ class Asset:
         self.entity_tokens = set(entity.split()) if entity else set()
         self.tokens = tokens
         self.source_id = source_id
+        # Structured clip tags (see CLIP_TAGGING.md). Empty/None unless
+        # apply_tags() loaded a dict-format entry for this asset.
+        self.persons = set()     # canonical names, e.g. {"meghan markle"}
+        self.topics = set()      # canonical topic phrases, e.g. {"red carpet"}
+        self.clip_type = None     # interview|redcarpet|paparazzi|talkshow|...
 
     def __repr__(self):
         return f"<Asset {os.path.basename(self.path)} entity={self.entity!r}>"
@@ -146,7 +206,15 @@ class AssetIndex:
         return added
 
     def apply_tags(self, tags):
-        """Merge a {path_or_basename: [tags]} mapping onto the indexed assets."""
+        """Merge a {path_or_basename: tags} mapping onto the indexed assets.
+
+        Two value formats are accepted, and may be mixed in one file:
+
+            "clip.mp4": ["wedding", "london"]              # legacy keywords
+            "clip.mp4": {"persons": ["meghan markle"],      # structured tags
+                         "topics": ["surrogacy"],
+                         "clip_type": "interview"}
+        """
         if not tags:
             return 0
         by_base = defaultdict(list)
@@ -157,18 +225,18 @@ class AssetIndex:
 
         applied = 0
         for key, values in tags.items():
-            if isinstance(values, str):
-                values = [values]
-            extra = set()
-            for v in values:
-                extra.update(tokenize(v))
-            if not extra:
+            persons, topics, clip_type, extra = _parse_tag_value(values)
+            if not extra and not persons and not topics and not clip_type:
                 continue
 
             target = by_abs.get(os.path.normcase(os.path.abspath(key)))
             targets = [target] if target else by_base.get(os.path.basename(key).lower(), [])
             for a in targets:
                 a.tokens |= extra
+                a.persons |= persons
+                a.topics |= topics
+                if clip_type:
+                    a.clip_type = clip_type
                 applied += 1
         return applied
 
@@ -449,11 +517,22 @@ class SemanticMatcher:
             usable = [a for a in pool
                       if self.score(a, tokens, entities, position) > float("-inf")]
 
+            # Tier 0 - person-tagged clips of whoever is being discussed. A
+            # "persons" tag names exactly who is on screen, so it outranks
+            # folder-label guesses and generic pool clips alike. Untagged pool
+            # clips are only reached when no person-tagged clip is usable.
+            # (Clips only: image pools are untouched by this workstream.)
+            dominant_norm = {norm_person(e) for e in dominant}
+            person_matched = [a for a in usable
+                              if kind == "clip" and a.persons & dominant_norm]
+
             # Tier 1 - footage of the person actually being discussed.
             preferred = [a for a in usable if a.entity in dominant]
-            had_subject_asset = bool(preferred)
+            had_subject_asset = bool(person_matched or preferred)
 
-            if preferred:
+            if person_matched:
+                candidates = person_matched
+            elif preferred:
                 candidates = preferred
             else:
                 # Tier 2 - fallback to default entity (main subject) or neutral footage
@@ -500,6 +579,7 @@ class SemanticMatcher:
         self.match_log.append({
             "position": position, "start": round(start, 2), "kind": kind,
             "file": os.path.basename(best.path), "entity": best.entity,
+            "persons": sorted(best.persons),
             "score": round(best_score, 3),
             "entities_in_script": {e: round(w, 2) for e, w in
                                    sorted(entities.items(), key=lambda kv: -kv[1])},
@@ -534,7 +614,11 @@ class SemanticMatcher:
         named = [m for m in self.match_log if m["named_subjects"]]
         correct = missed = unavailable = wrong_person = 0
         for m in named:
-            if m["entity"] in m["named_subjects"]:
+            # A person-tagged clip showing a named person counts as correct
+            # even when its folder entity is generic (e.g. the shared pool).
+            person_match = bool(set(m.get("persons", []))
+                                & {norm_person(e) for e in m["named_subjects"]})
+            if m["entity"] in m["named_subjects"] or person_match:
                 correct += 1
             elif not m["subject_asset_available"]:
                 # Nothing of that person was left to show. Falling back to the
@@ -563,7 +647,13 @@ class SemanticMatcher:
 
 
 def load_tags(path):
-    """Read a tags JSON: {"file.jpg": ["keyword", ...], ...}"""
+    """Read a tags JSON: {"file.jpg": ["keyword", ...], ...}
+
+    Values may also be structured dicts -
+    {"persons": [...], "topics": [...], "clip_type": "..."} - which
+    apply_tags() stores on the Asset (see CLIP_TAGGING.md). Both formats may
+    be mixed in one file.
+    """
     if not path or not os.path.exists(path):
         return {}
     with open(path, "r", encoding="utf-8-sig") as f:

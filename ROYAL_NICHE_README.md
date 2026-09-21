@@ -78,7 +78,7 @@ run TTS + `fresh_assets.py` (Serper) + slicer in parallel, then run
 
 ---
 
-## 3. The 36 Permanent Rules (from `pipeline/PIPELINE_RULES.md`)
+## 3. The 48 Permanent Rules (from `pipeline/PIPELINE_RULES.md`)
 
 These are enforced in code; do not override without discussion.
 
@@ -119,6 +119,18 @@ These are enforced in code; do not override without discussion.
 | 34 | Intro clip is a **cold open**: a single full-frame comp_XXXX shot (top 12 % + bottom 18 % cropped for watermark), plays with its **source audio**, capped at 6 s. Voiceover is delayed by exactly the intro duration; script SRT spans are shifted by the same delta so mid-video sync stays exact. Reference feel: <https://www.youtube.com/watch?v=8XU1Hl0OzKw> | `timeline_engine.py` intro segment, `render_engine.py` clip branch, `build_audio_matrix` |
 | 35 | Entity folder cap = 500 images, scene folder cap = 4000. Beyond that Stage 2 asset validation (Laplacian blur + watermark scan on every image) thrashes RAM without any pick-quality gain — the semantic matcher can't meaningfully rank a 10 000-image pool per slot. Random-sample per entity in `pool_merge.py` keeps the variety, drops the bloat. | `pipeline/pool_merge.py` |
 | 36 | Auto-generate title cards for **date / time / location** callouts in the narration. `datetime_cards.find_callouts` scans the SRT for patterns like `Wednesday, August 26th`, `at 11:47 in the morning`, `at Birmingham Airport`; `datetime_cards.render_card` composes a memorial-style card (blurred royal backdrop + red-underlined kicker + big serif headline). `timeline_engine.build_timeline` swaps any segment whose midpoint overlaps a callout window to that card, so a "very specific time/place" beat never lands on a random pool photo. Reference: dark backdrop + big serif + red-underlined kicker like the "IN MEMORY / Never Forget" cards. | `pipeline/datetime_cards.py`, `timeline_engine.py` `build_timeline` |
+| 37 | Segment-scoped entity inference: matcher credits entity names only from words spoken *inside* the segment (was ±8 s padded window) — fixes wrong-person picks from neighbouring segments | `semantic_matcher.py` `query` |
+| 38 | `default_entity` normalised (`.lower().replace("_", " ")`) so the main-subject fallback actually matches folder entities | `timeline_engine.py`, `semantic_matcher.py` |
+| 39 | Two 1280×720 ultra-realistic thumbnails per video (reaction-split + dual-subject templates) | `thumbnail_builder.py`, `THUMBNAIL_TEMPLATES.md` |
+| 40 | YouTube metadata v2 structure (3 improved titles, description + disclaimer, chapters, hashtags, tags, pinned comment) | `metadata_engine.py`, `METADATA_TEMPLATE.md` |
+| 41 | Person-tagged clips win named-person segments: clips carry `{"persons": [...], "topics": [...], "clip_type": ...}` in the `--asset-tags` JSON (see `CLIP_TAGGING.md`); `pick()` tries person-tagged clips first (Tier 0) when the segment names a person | `semantic_matcher.py`, `make_clip_tags.py` |
+| 42 | Pacing: no visual hold longer than ~6 s — longer holds split into 2–4 s sub-shots, each a different visual (never the same frame re-stretched); narration timing untouched | `timeline_engine.py` `_apply_pacing_pass` |
+| 43 | Word-level styled captions burned in by default (**supersedes RULE 8**): white bold serif, 1–3 words, bottom-center dark pill, word-timed from `voiceover.srt` (SRT itself never modified) | `subtitle_formatter.py`, `pipeline.py`, `style/styled_captions.py` |
+| 44 | Signature grade on the final mux: subtle RGB-split edges + fine film grain (tasteful, archival-leak feel) | `style/signature_grade.py`, `render_engine.py` |
+| 45 | Circular channel badge (navy/gold, configurable name) burned top-right of every frame; generated once per video | `style/watermark.py`, `pipeline.py`, `render_engine.py` |
+| 46 | Framed commentator panel for quote/expert segments: frosted-glow rounded panel on dark navy; timeline marks `seg["style"]="commentator"` for comp_ clips over quoted/attributed narration (capped, spaced) | `style/commentator_panel.py`, `pipeline.py`, `render_engine.py` |
+| 47 | Irrelevant-visual guard: matcher picks below `relevance_threshold` are dropped and replaced with a topic-themed graphic card — never a random image to fill the slot | `timeline_engine.py` `_relevance_gate` |
+| 48 | Motion target ≥ 80 % moving visuals: image segments steered off the renderer's static motion-wheel slots; static share reported in the build log | `timeline_engine.py` `_renumber_for_motion` |
 
 Plus the Ken-Burns zero-shake mechanic (perspective filter, `zoomPerSec = 0.010`,
 motion wheel 17 % static / 8 % pan / rest zoom).
@@ -163,7 +175,7 @@ config JSON.
 | `datetime_cards.py` | RULE 36 — detect date / time / location callouts in the SRT and render memorial-style title cards (blurred royal backdrop + red-underlined kicker + serif headline) that swap in over the matching segment |
 | `kb_jitter.py` | Measure per-frame jitter (dx/dy sd, px) for QC |
 | `index_retriever.py` | Wrapper for the D:\ V3 semantic index (optional secondary asset source) |
-| `subtitle_formatter.py` | SRT → styled ASS (used only when RULE 8 flipped to burn subtitles) |
+| `subtitle_formatter.py` | Word-level SRT → styled ASS pill captions, burned in by default (RULE 43) |
 | `metadata_engine.py` | Generates YouTube title / description / chapter file (RULE 40 structure) |
 | `assets/grids/`, `assets/sparkle-backgrounds/` | Backdrop libraries for cards + framed clips |
 
@@ -437,3 +449,16 @@ recycled. Concretely, per video:
   - Reinstalling opencv-python 4.10 so face detection (dropped when
     something bumped cv2 to a broken 5.0 build) is available again;
     RULE 31 can now also drop scene photos that carry no face.
+
+- **Editing-style upgrade** (Sep 21, approved by operator): reference analysis
+  of competitor "Palace Insider" (394 scenes, 13.5 cuts/min, median shot
+  3.85 s, word-level pill captions, RGB-split + grain grade, top-right badge,
+  framed commentator panels, subject-synced footage — see
+  `~/workspace/video_analysis/REFERENCE_STYLE_ANALYSIS.md`) became RULES
+  41–48: person-tagged clip sourcing (`CLIP_TAGGING.md`), ≤6 s pacing splits,
+  word-level styled captions burned in by default (RULE 43 supersedes RULE 8),
+  signature RGB-split + grain grade, channel watermark badge, framed
+  commentator panel, irrelevant-visual relevance guard, ≥80 % motion target.
+  New `pipeline/style/` layer (styled_captions, signature_grade, watermark,
+  commentator_panel) + `pipeline/tests/` (64 unittest cases). Verified with a
+  10-segment test render in `~/workspace/royal/style_test/`.

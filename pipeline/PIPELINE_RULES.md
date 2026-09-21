@@ -227,3 +227,99 @@
 #   Tags: 4-5 related
 #   Pinned Comment (engagement question)
 # - Enforced in: metadata_engine.py (structure), METADATA_TEMPLATE.md (spec).
+
+## RULE 41: Person-Tagged Clips Win Named-Person Segments (subject sync)
+# Pool clip filenames are opaque (comp_0001.mp4), so the matcher could not
+# tell who is on screen and showed random B-roll over named-person narration.
+# Clips may now carry structured tags - {"persons": ["meghan markle"],
+# "topics": [...], "clip_type": "interview"} - in the --asset-tags JSON
+# (legacy keyword lists still work; see CLIP_TAGGING.md). When the current
+# segment's own words name a person, SemanticMatcher.pick() tries Tier 0
+# first: clips whose "persons" tag includes that person, ahead of folder
+# labels and generic pool clips. Untagged pool clips are only picked when no
+# person-tagged clip is usable. Only tag what you can verify - an untagged
+# clip is neutral B-roll, a wrongly tagged clip actively misleads.
+# - Enforced in: semantic_matcher.py (apply_tags, pick Tier 0, coverage),
+#   make_clip_tags.py (skeleton generator), CLIP_TAGGING.md (schema/hand-tag
+#   guide), tests/test_clip_tags.py.
+
+## RULE 42: Pacing — No Visual Hold Longer Than ~6s
+# Reference pacing (Palace Insider, PySceneDetect): 13.5 cuts/min, median shot
+# 3.85s, 62.7% of shots 2-5s. Our sentence-per-segment holds (often 8-15s+)
+# read as slow next to that. After the timeline is built, any visual hold
+# longer than pacing_max_hold_s (default 6.0) is split into 2-4s sub-shots.
+# Every sub-shot is a genuinely different visual — a fresh matcher pick, a
+# different curated photo, or a different Ken Burns variant — never the same
+# static frame re-stretched. Narration/SRT timing is untouched (visual-only
+# splits); opening_intro_native and datetime_card are never split.
+# - Enforced in: timeline_engine.py (_apply_pacing_pass, _split_visual,
+#   _pacing_subshots). Tests: tests/test_pacing_guard.py.
+
+## RULE 43: Word-Level Styled Captions Burned In (supersedes RULE 8)
+# RULE 8 ("no burned-in captions") is retired. The reference style runs
+# word-level captions on ~100% of frames: white bold serif, 1-3 words at a
+# time, bottom-center, on a semi-transparent dark pill, word-timed. The
+# pipeline now burns exactly that from the existing word-level voiceover.srt:
+# words are grouped into <=3-word / <=1.2s caption events and rendered to ASS
+# (DejaVu Serif Bold 64, BorderStyle=4, Back &H80000000, Alignment=2 bottom-
+# center, MarginV 70 — see style/styled_captions.py). The standalone
+# voiceover.srt is never modified; only the derived .ass is generated beside
+# it and burned at the final mux. Default is ON (burn_subtitles=true);
+# disable per-project with "burn_subtitles": false or --no-subtitles.
+# - Enforced in: subtitle_formatter.py (convert_srt_to_ass), pipeline.py
+#   (ASS auto-generation, want_subs default). Tests: tests/test_captions.py.
+
+## RULE 44: Signature Grade — Subtle RGB-Split + Film Grain
+# Every finished video carries the channel's signature grade: a subtle
+# chromatic-aberration/RGB-split on edges (red +2px, blue -2px at 1080p,
+# scaled by frame height) plus fine temporal film grain (noise alls=9).
+# Tasteful, never cartoonish — the "premium archival leak" feel. Applied once
+# at the final mux (cheap: rgbashift + noise only), after captions, so it
+# covers every segment uniformly. Disable per-project with
+# "signature_grade": false; tune grain with "grade_grain" (0 = off).
+# - Enforced in: style/signature_grade.py (grade_filter),
+#   render_engine.py (mux finishing chain). Tests: tests/test_grade_watermark.py.
+
+## RULE 45: Channel Watermark Badge, Top-Right, Every Frame
+# A circular channel badge (navy disc, gold ring, channel name in white
+# serif) is burned into the top-right of every frame (~140px at 1080p, 24px
+# margin). Generated once per video into the work dir via
+# style/watermark.py make_badge(channel_name, badge.png); the mux overlays it
+# with a self-contained movie-filter fragment. Channel name comes from the
+# topic config ("channel_name", default "ROYAL INSIDER"). Disable per-project
+# with "watermark": false.
+# - Enforced in: style/watermark.py, pipeline.py (badge generation),
+#   render_engine.py (mux finishing chain). Tests: tests/test_grade_watermark.py.
+
+## RULE 46: Framed Commentator Panel For Quote/Expert Segments
+# Commentator/quote/expert segments render inside a reusable framed panel:
+# the clip (or a slow-drift still) sits in a rounded rect with a glowing
+# white frosted border on a dark navy background — picture-in-picture style,
+# matching the reference. The timeline marks segments with
+# seg["style"]="commentator" when the visual is a comp_ clip AND the spoken
+# words contain a direct quote or attribution cue; capped at
+# max_commentator_panels (default 6) per video, spaced >=90s apart. Takes
+# precedence over the RULE 14 grid-card framing for those segments; RULE 14
+# still applies to ordinary competitor clips.
+# - Enforced in: style/commentator_panel.py (geometry, background, filter),
+#   pipeline.py (_mark_commentator_segments), render_engine.py
+#   (_render_commentator_segment). Tests: tests/test_panel.py.
+
+## RULE 47: Irrelevant-Visual Guard — Relevance Threshold, Never Random
+# If the matcher's pick for a segment scores below relevance_threshold
+# (default 1.0 — real entity matches score ~3-6+), the visual is DROPPED and
+# replaced with a safe fallback: a topic-themed generated graphic card (which
+# still moves via Ken Burns). A random unrelated image is NEVER used just to
+# fill a slot. Guard replacements are marked section="guard_fallback" and
+# counted in the build log ("Edit pass (B+G+H): ... M guard replacements").
+# - Enforced in: timeline_engine.py (_relevance_gate, _guard_replacement).
+#   Tests: tests/test_pacing_guard.py.
+
+## RULE 48: Motion Target — >=80% Moving Visuals
+# Reference: ~92% of runtime is moving visuals. The pipeline targets >=80%:
+# real footage clips always count as moving; image segments are steered away
+# from the renderer's static motion-wheel slots so pure-static holds stay
+# under 20% of runtime. The build log reports the static share
+# ("Edit pass (B+G+H): N segments, K holds split, X% static runtime, ...").
+# - Enforced in: timeline_engine.py (_renumber_for_motion, _static_share).
+#   Tests: tests/test_pacing_guard.py.

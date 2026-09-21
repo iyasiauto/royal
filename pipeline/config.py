@@ -42,3 +42,29 @@ ROYAL_ENTITIES = [
     "Ray Mill House", "Balmoral Castle", "Buckingham Palace", "Kensington Palace",
     "Crown Jewels", "Windsor Castle"
 ]
+
+# Editing-style upgrade defaults (RULES 41-48; topic configs may override).
+# These mirror the cfg.get() defaults used across the pipeline.
+STYLE_DEFAULTS = {
+    # A — subject-synced clip sourcing (tags ride the existing --asset-tags path)
+    # B — pacing: split visual holds longer than this into 2-4s sub-shots
+    "pacing_max_hold_s": 6.0,
+    "pacing_no_split_sections": ["opening_intro_native", "datetime_card"],
+    # G — relevance guard: matcher scores below this are dropped/replaced
+    "relevance_threshold": 1.0,
+    # C — word-level styled captions burned in (supersedes RULE 8)
+    "burn_subtitles": True,
+    # D — signature grade: subtle RGB-split + film grain on the final mux
+    "signature_grade": True,
+    "grade_grain": 9,
+    # E — channel watermark badge, top-right of every frame
+    "watermark": True,
+    "channel_name": "ROYAL INSIDER",
+    "badge_display_px": 140,
+    "badge_margin_px": 24,
+    "badge_source_px": 200,
+    # F — framed commentator panel for quote/expert segments
+    "commentator_panel": True,
+    "max_commentator_panels": 6,
+    "commentator_min_gap_s": 90.0,
+}

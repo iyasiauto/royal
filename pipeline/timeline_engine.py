@@ -125,6 +125,12 @@ class TimelineEngine:
         self.entity_boost = float(entity_boost)
         self.matcher = None
         self._clip_dur_cache = {}
+        # Workstream B+G+H (editing-style upgrade) per-build state, reset at
+        # the top of build_timeline.
+        self._pacing_splits = 0
+        self._guard_replacements = 0
+        self._guard_cursor = 0
+        self._split_cursor = 0
 
     def _clip_native_dur(self, path):
         """Duration (s) of a clip, cached. 0.0 if unreadable."""
@@ -567,6 +573,196 @@ class TimelineEngine:
             f"sparkle={len(sparkle_cards)}) into {self.graphics_dir}")
         return made
 
+    # --------------------------------------- pacing / relevance guard / motion
+    # Workstream B+G+H (editing-style upgrade). New knobs all come from the
+    # cfg dict with defaults:
+    #   pacing_max_hold_s      (default 6.0)  - split longer visual holds
+    #   pacing_no_split_sections (default ["opening_intro_native",
+    #                              "datetime_card"]) - never split these
+    #   relevance_threshold    (default 1.0)  - drop matcher picks below this
+
+    def _wheel_static_slots(self):
+        """Indices (mod 12) the renderer's motion wheel marks fully static.
+
+        render_engine._ken_burns ignores the timeline's motion field and
+        derives motion purely from motion_wheel(segment index) with
+        static_share=0.17. Steering image segments away from these slots is
+        the only timeline-side way to cut static holds (H). Computed from
+        the real function so a render_engine change can't silently drift.
+        """
+        try:
+            from render_engine import motion_wheel
+            return {i for i in range(12) if motion_wheel(i) == "static"}
+        except Exception:
+            return {3, 9}  # matches motion_wheel's current defaults
+
+    def _static_share(self, segments):
+        """Fraction of runtime the renderer will hold fully static (H).
+
+        Clips always move (real footage). An image is static exactly when its
+        index lands on a static motion-wheel slot.
+        """
+        slots = self._wheel_static_slots()
+        total = sum(float(s.get("duration", 0)) for s in segments)
+        if total <= 0:
+            return 0.0
+        static = sum(float(s.get("duration", 0)) for s in segments
+                     if s.get("type") == "image"
+                     and int(s.get("index", 0)) % 12 in slots)
+        return static / total
+
+    def _guard_replacement(self, graphics, cursor):
+        """Safe fallback visual for a below-threshold pick (G).
+
+        A generated graphic card (topic-themed via curated-pool biasing) —
+        never a random unrelated image just to fill the slot. Returns
+        (file, new_cursor), or (None, cursor) when no cards exist.
+        """
+        if graphics:
+            return graphics[cursor % len(graphics)], cursor + 1
+        return None, cursor
+
+    def _relevance_gate(self, asset, score, graphics, cursor):
+        """Apply the per-segment relevance threshold (G) to a matcher pick.
+
+        Returns (file, replaced, new_cursor). Picks scoring below
+        cfg['relevance_threshold'] are dropped in favour of a safe
+        graphic-card fallback; with no graphics available the original pick
+        is kept rather than leaving the segment without a visual.
+        """
+        threshold = float(self.cfg.get("relevance_threshold", 1.0))
+        if asset is not None and score is not None and score >= threshold:
+            return asset.path, False, cursor
+        card, cursor = self._guard_replacement(graphics, cursor)
+        if card:
+            self._guard_replacements += 1
+            return card, True, cursor
+        return (asset.path if asset else None), False, cursor
+
+    def _pacing_subshots(self, dur):
+        """How many 2-4 s sub-shots a hold of dur seconds splits into (B)."""
+        n = max(2, int(round(dur / 3.0)))
+        while n > 2 and dur / n < 2.0:
+            n -= 1
+        while dur / n > 4.0:
+            n += 1
+        return n
+
+    def _split_visual(self, seg, kind, s0, s1, pos, prev_file, prev_motion,
+                      graphics, curated, motions):
+        """Pick a genuinely different visual for one pacing sub-shot (B).
+
+        Prefers a fresh matcher pick (used_paths already excludes the
+        previous sub-shot's asset) with the relevance gate (G) applied. If
+        the matcher is unavailable or can only repeat the previous asset,
+        rotates to a different curated photo / Ken Burns variant for images
+        — never just re-stretching the same static frame.
+
+        Returns (file, motion, guard_replaced).
+        """
+        threshold = float(self.cfg.get("relevance_threshold", 1.0))
+        if self.matcher and kind in ("image", "clip"):
+            try:
+                asset, score, _ents = self.matcher.pick(s0, s1, kind, pos)
+            except Exception:
+                asset, score = None, 0.0
+            if asset is not None:
+                if score >= threshold and asset.path != prev_file:
+                    motion = seg.get("motion") or random.choice(motions)
+                    if kind == "image" and motion == prev_motion:
+                        motion = next(m for m in motions if m != prev_motion)
+                    return asset.path, motion, False
+                if score < threshold:
+                    card, self._guard_cursor = self._guard_replacement(
+                        graphics, self._guard_cursor)
+                    if card:
+                        self._guard_replacements += 1
+                        return card, "zoomout", True
+                # Pool exhausted (matcher can only repeat prev_file): fall
+                # through to curated / motion rotation below.
+        # Fallback: a different curated photo, else the same photo with a
+        # different Ken Burns variant (images) — never the identical static
+        # frame twice in a row. Clips keep their footage: a contiguous
+        # restart of the same clip reads as a hard cut, not a frozen frame.
+        if kind == "image":
+            if curated:
+                for k in range(len(curated)):
+                    cand = curated[(self._split_cursor + k) % len(curated)]
+                    if cand != prev_file and cand != seg.get("file"):
+                        self._split_cursor += 1
+                        motion = random.choice(
+                            [m for m in motions if m != prev_motion])
+                        return cand, motion, False
+                self._split_cursor += 1
+            motion = random.choice([m for m in motions if m != prev_motion])
+            return seg.get("file"), motion, False
+        return seg.get("file"), "none", False
+
+    def _apply_pacing_pass(self, segments, graphics, curated):
+        """Split over-long visual holds into distinct 2-4 s sub-shots (B).
+
+        Splits are visual-only: sub-shots tile the parent's [start, end]
+        exactly, so narration timing and word-level SRT alignment are
+        untouched and total duration is preserved.
+        """
+        max_hold = float(self.cfg.get("pacing_max_hold_s", 6.0))
+        no_split = set(self.cfg.get("pacing_no_split_sections",
+                                    ["opening_intro_native", "datetime_card"]))
+        motions = ["zoomin", "zoomout", "panright", "panleft"]
+
+        out = []
+        pos = len(segments) * 2  # matcher cooldown positions continue past
+                                 # the build loop
+        for seg in segments:
+            dur = float(seg.get("duration", 0))
+            if dur <= max_hold or seg.get("section") in no_split:
+                out.append(seg)
+                continue
+            n = self._pacing_subshots(dur)
+            sub = dur / n
+            start = float(seg["start"])
+            kind = seg.get("type")
+            self._pacing_splits += 1
+            prev_file = seg.get("file")
+            prev_motion = seg.get("motion")
+            for i in range(n):
+                b0 = start + i * sub
+                b1 = start + dur if i == n - 1 else start + (i + 1) * sub
+                s0, s1 = round(b0, 2), round(b1, 2)
+                new = dict(seg)
+                new.update({"start": s0, "end": s1, "duration": round(s1 - s0, 2),
+                            "pacing_split": True})
+                file_choice, motion_choice, guard_hit = self._split_visual(
+                    seg, kind, s0, s1, pos + i, prev_file, prev_motion,
+                    graphics, curated, motions)
+                new["file"] = file_choice
+                if kind == "image":
+                    new["motion"] = motion_choice
+                    if guard_hit:
+                        new["section"] = "guard_fallback"
+                prev_file = file_choice
+                prev_motion = motion_choice
+                out.append(new)
+            pos += n
+        return out
+
+    def _renumber_for_motion(self, segments):
+        """Steer image segments away from static motion-wheel slots (H).
+
+        Clips always move, so they may occupy any index; images skip the
+        static slots. Concat follows list order (not index), so gaps are
+        harmless — indices only name the per-segment render files.
+        """
+        slots = self._wheel_static_slots()
+        idx = 0
+        for s in segments:
+            if s.get("type") == "image":
+                while idx % 12 in slots:
+                    idx += 1
+            s["index"] = idx
+            idx += 1
+        return segments
+
     # -------------------------------------------------------------- timeline
 
     def _resolve_hook_assets(self, curated, graphics, topic_files):
@@ -590,6 +786,10 @@ class TimelineEngine:
     def build_timeline(self, vo_duration, opening_clip, out_path):
         """Build the full segment list and write it to out_path as JSON."""
         vo_duration = float(vo_duration)
+        self._pacing_splits = 0
+        self._guard_replacements = 0
+        self._guard_cursor = 0
+        self._split_cursor = 0
         images, grids, clips = self.collect_assets()
         curated, topic_files = self.curate_images(images)
 
@@ -634,7 +834,16 @@ class TimelineEngine:
                     keep = _reserved_before | ({asset.path} if asset else set())
                     self.matcher.used_paths &= keep
                 if asset:
-                    picked = asset.path
+                    # G: relevance guard — a weak intro pick falls back to the
+                    # first content clip (the intro needs real footage with
+                    # source audio, so no graphic-card swap here).
+                    _thr = float(self.cfg.get("relevance_threshold", 1.0))
+                    if _score < _thr:
+                        log(f"Intro pick scored {_score:.2f} below relevance "
+                            f"threshold {_thr}; using first content clip.")
+                        asset = None
+                    else:
+                        picked = asset.path
             if not picked:
                 # Fall back to the first non-early clip, then first clip period.
                 content_clips = [c for c in clips
@@ -692,21 +901,32 @@ class TimelineEngine:
         random.seed(self.asset_seed)
 
         def pick_clip(at_index, start, end):
-            """Semantic pick when available, else cooldown-ordered round robin."""
+            """Semantic pick when available, else cooldown-ordered round robin.
+
+            Returns {"kind": "clip", ...}, or {"kind": "image", "path": card}
+            when the relevance guard (G) replaced a weak pick with a safe
+            graphic card, or None when no clips exist at all.
+            """
             if self.matcher:
-                asset, _score, _ents = self.matcher.pick(start, end, "clip", at_index)
+                asset, score, _ents = self.matcher.pick(start, end, "clip", at_index)
                 if asset:
-                    return {"path": asset.path, "has_audio": False,
+                    file, replaced, self._guard_cursor = self._relevance_gate(
+                        asset, score, graphics, self._guard_cursor)
+                    if replaced:
+                        log(f"Guard: clip pick at {start:.1f}s scored "
+                            f"{score:.2f}; using graphic card.")
+                        return {"kind": "image", "path": file}
+                    return {"kind": "clip", "path": asset.path, "has_audio": False,
                             "source_id": asset.source_id}
             for c in generic_clips:
                 last = used_sources.get(c.get("source_id", c["path"]), -10 ** 9)
                 if at_index - last >= self.clip_cooldown:
                     used_sources[c.get("source_id", c["path"])] = at_index
-                    return c
+                    return {"kind": "clip", **c}
             if generic_clips:
                 c = generic_clips[at_index % len(generic_clips)]
                 used_sources[c.get("source_id", c["path"])] = at_index
-                return c
+                return {"kind": "clip", **c}
             return None
 
         # Segment 0 — RULE 34: full-frame intro clip carrying its OWN source
@@ -798,10 +1018,15 @@ class TimelineEngine:
                 nonlocal img_cursor
                 img = None
                 if self.matcher:
-                    asset, _score, _ents = self.matcher.pick(
+                    asset, score, _ents = self.matcher.pick(
                         current, current + dur, "image", seg_idx)
                     if asset:
-                        img = asset.path
+                        img, replaced, self._guard_cursor = self._relevance_gate(
+                            asset, score, graphics, self._guard_cursor)
+                        if replaced:
+                            log(f"Guard: image pick at {current:.1f}s scored "
+                                f"{score:.2f}; using graphic card.")
+                            section = "guard_fallback"
                 if img is None:
                     img = curated[img_cursor % len(curated)]
                     img_cursor += 1
@@ -831,7 +1056,7 @@ class TimelineEngine:
             # AVD holds up before the slower body of the story.
             elif (current < 600 and seg_idx % 2 == 0) or (current >= 600 and seg_idx % 3 == 0):
                 c = pick_clip(seg_idx, current, current + dur)
-                if c:
+                if c and c["kind"] == "clip":
                     used_dur = self._clip_seg_dur(c["path"], dur)
                     segments.append({
                         "index": seg_idx, "start": round(current, 2),
@@ -839,6 +1064,16 @@ class TimelineEngine:
                         "type": "clip", "file": c["path"], "motion": "none",
                         "postcard": False, "has_audio": False,
                         "section": "documentary_clip",
+                    })
+                elif c:
+                    # G: relevance guard replaced the weak clip pick with a
+                    # safe graphic card — rendered as a moving image segment.
+                    segments.append({
+                        "index": seg_idx, "start": round(current, 2),
+                        "end": round(current + dur, 2), "duration": dur,
+                        "type": "image", "file": c["path"], "motion": "zoomout",
+                        "postcard": False, "has_audio": False,
+                        "section": "guard_fallback",
                     })
                 else:
                     add_image("body", seg_idx % 5 == 0)
@@ -906,9 +1141,22 @@ class TimelineEngine:
         except Exception as e:
             log(f"RULE 36 skipped: {e!r}")
 
+        # Workstream B+G+H: split over-long holds into distinct 2-4 s
+        # sub-shots (visual-only; narration timing untouched), then renumber
+        # indices so image segments dodge the renderer's static motion-wheel
+        # slots (target: >=80% of runtime moving).
+        segments = self._apply_pacing_pass(segments, graphics, curated)
+        segments = self._renumber_for_motion(segments)
+
         counts = {}
         for s in segments:
             counts[s["type"]] = counts.get(s["type"], 0) + 1
+
+        static_share = self._static_share(segments)
+        log(f"Edit pass (B+G+H): {len(segments)} segments, "
+            f"{self._pacing_splits} holds split, "
+            f"{100 * static_share:.1f}% static runtime, "
+            f"{self._guard_replacements} guard replacements.")
 
         data = {
             "total_duration": round(current, 2),

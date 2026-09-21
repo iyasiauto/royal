@@ -18,6 +18,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import looks as looks_module
 
+# Style-upgrade layer (RULES 43-46). Imported lazily-tolerant: the pipeline
+# package layout (pipeline.py) and bare-script layout (tests) differ.
+try:
+    from style.signature_grade import grade_filter
+    from style.watermark import watermark_filter
+    from style.commentator_panel import (
+        build_panel_filter, make_panel_background, detect_fg_kind)
+    _STYLE_OK = True
+except ImportError:  # pragma: no cover - style layer missing
+    _STYLE_OK = False
+    grade_filter = watermark_filter = None
+    build_panel_filter = make_panel_background = detect_fg_kind = None
+
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -73,7 +86,11 @@ class RenderEngine:
                  bitrate="2500k", maxrate="3500k", bufsize="5000k",
                  vo_volume=1.75, bgm_volume=0.08, opening_volume=1.5,
                  limiter_ceiling=0.95, hwaccel="cuda",
-                 look=None, look_overrides=None, subtitle_path=None, **kwargs):
+                 look=None, look_overrides=None, subtitle_path=None,
+                 channel_name="ROYAL INSIDER", watermark=True, badge_path=None,
+                 badge_display_px=140, badge_margin_px=24,
+                 signature_grade=True, grade_grain=9,
+                 commentator_panel=True, **kwargs):
         self.work_dir = work_dir
         self.bgm_path = bgm_path if bgm_path and os.path.exists(bgm_path) else None
         if bgm_path and not self.bgm_path:
@@ -110,6 +127,22 @@ class RenderEngine:
         self.subtitle_path = subtitle_path if subtitle_path and os.path.exists(subtitle_path) else None
         if subtitle_path and not self.subtitle_path:
             log(f"WARNING: subtitle file not found, captions will be off: {subtitle_path}")
+
+        # Style-upgrade layer (RULES 43-46): signature grade + channel badge
+        # are applied once at the final mux; the commentator panel is a
+        # per-segment treatment (see _render_commentator_segment).
+        self.channel_name = channel_name or "ROYAL INSIDER"
+        self.watermark = bool(watermark)
+        self.badge_path = badge_path if badge_path and os.path.exists(badge_path) else None
+        if watermark and badge_path and not self.badge_path:
+            log(f"WARNING: badge not found, watermark off: {badge_path}")
+            self.watermark = False
+        self.badge_display_px = int(badge_display_px or 140)
+        self.badge_margin_px = int(badge_margin_px or 24)
+        self.signature_grade = bool(signature_grade)
+        self.grade_grain = int(grade_grain or 0)
+        self.commentator_panel = bool(commentator_panel)
+        self._panel_bg = None  # lazily generated per work_dir
 
     def _stage_subtitle(self):
         """Copy the subtitle to a special-char-free temp dir and return
@@ -307,6 +340,69 @@ class RenderEngine:
 
         return _join(fit, persp, scale_out, grade, self._fades(dur))
 
+    # -------------------------------------------------- commentator panel
+
+    def _panel_bg_path(self):
+        """Generate (once per work_dir) the commentator panel background PNG."""
+        if self._panel_bg and os.path.exists(self._panel_bg):
+            return self._panel_bg
+        out = os.path.join(self.work_dir, "panel_bg.png")
+        if not os.path.exists(out):
+            make_panel_background(out, width=self.W, height=self.H)
+            log(f"Panel background generated: {out}")
+        self._panel_bg = out
+        return out
+
+    def _render_commentator_segment(self, seg):
+        """RULE 46: render one commentator/quote segment inside the
+        frosted-glow panel on dark navy. Returns (index, path, ok, elapsed,
+        error) like _render_segment."""
+        idx = seg["index"]
+        out_file = os.path.join(self.segments_dir, f"seg_{idx:04d}.mp4")
+        dur = float(seg["duration"])
+        src = seg.get("file")
+        started = time.time()
+
+        if not src or not os.path.exists(src):
+            return idx, out_file, False, 0.0, f"source missing: {src}"
+        try:
+            fg_kind = detect_fg_kind(src)
+        except ValueError:
+            fg_kind = "video" if seg.get("type") == "clip" else "image"
+
+        bg = self._panel_bg_path()
+        fc = build_panel_filter(fg_kind=fg_kind, duration=dur, fps=self.fps)
+        tail = _join(self.look["grade"], self._fades(dur), "format=yuv420p")
+        if tail:
+            fc = f"{fc};[vout]{tail}[v]"
+            outlabel = "[v]"
+        else:
+            outlabel = "[vout]"
+        if fg_kind == "image":
+            fg_args = ["-loop", "1", "-framerate", str(self.fps), "-i", src]
+        else:
+            fg_args = self._decode_args() + ["-ss", "0", "-t", str(dur),
+                                             "-i", src]
+        cmd = (["ffmpeg", "-y", "-loop", "1", "-framerate", str(self.fps),
+                "-i", bg] + fg_args +
+               ["-filter_complex", fc, "-map", outlabel,
+                "-t", str(dur)] + self._gpu_encode_args() + [out_file])
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True,
+                                 errors="replace", timeout=120)
+            elapsed = time.time() - started
+            if res.returncode != 0 or not self._segment_ok(out_file):
+                tail_err = (res.stderr or "").strip().splitlines()[-3:]
+                if os.path.exists(out_file):
+                    try:
+                        os.remove(out_file)
+                    except OSError:
+                        pass
+                return idx, out_file, False, elapsed, " | ".join(tail_err) or "ffmpeg failed"
+            return idx, out_file, True, elapsed, None
+        except Exception as e:
+            return idx, out_file, False, time.time() - started, f"worker exc: {e}"
+
     # -------------------------------------------------------------- segments
 
     def _render_segment(self, seg):
@@ -322,6 +418,12 @@ class RenderEngine:
 
         gpu = self._gpu_encode_args()
         stype = seg.get("type")
+
+        # RULE 46: commentator/quote/expert segments render inside the
+        # frosted-glow panel (takes precedence over the RULE 14 grid-card
+        # framing for comp_ clips).
+        if seg.get("style") == "commentator" and self.commentator_panel and _STYLE_OK:
+            return self._render_commentator_segment(seg)
 
         if stype == "headline":
             vf = _join(
@@ -608,21 +710,41 @@ class RenderEngine:
                 f"{out_label}alimiter=limit={self.limiter_ceiling}:level=disabled[aout]")
             out_label = "[aout]"
 
-        # Burn styled captions from the voiceover .ass/.srt when supplied. The
-        # concatenated video starts at t=0 and the subtitle timestamps are absolute
-        # from the same origin, so alignment is exact (RULE 6). Requires a video
-        # re-encode, so we drop -c:v copy only on this path.
+        # Style-upgrade finishing chain (RULES 43-45): styled word captions
+        # burned from the voiceover .ass when supplied, then the signature
+        # grade, then the channel badge — applied once here at the final mux
+        # instead of per segment. The concatenated video starts at t=0 and
+        # subtitle timestamps are absolute from the same origin, so caption
+        # alignment is exact (RULE 6). Requires a video re-encode, so we drop
+        # -c:v copy whenever any treatment is on.
         mux_cwd = None
+        vlabel = "0:v"
         if self.subtitle_path:
             subs_name, mux_cwd = self._stage_subtitle()
-            filters.append(f"[0:v]subtitles={subs_name}[vsub]")
-            video_map = "[vsub]"
+            filters.append(f"[{vlabel}]subtitles={subs_name}[vsub]")
+            vlabel = "vsub"
+        if self.signature_grade and _STYLE_OK and grade_filter:
+            filters.append(
+                f"[{vlabel}]{grade_filter(height=self.H, grain=self.grade_grain)}[vgrade]")
+            vlabel = "vgrade"
+        if self.watermark and self.badge_path and _STYLE_OK and watermark_filter:
+            filters.append(watermark_filter(
+                self.badge_path, margin=self.badge_margin_px,
+                badge_px=self.badge_display_px, main_label=f"[{vlabel}]"))
+            vlabel = "vwm"
+        if vlabel == "0:v":
+            video_map = "0:v"
+            video_codec = ["-c:v", "copy"]
+        elif self.cpu_mode:
+            # libx264 has no p1/vbr NVENC presets — plain software encode.
+            video_map = f"[{vlabel}]"
+            video_codec = ["-c:v", "libx264", "-preset", "veryfast",
+                           "-crf", "21", "-pix_fmt", "yuv420p"]
+        else:
+            video_map = f"[{vlabel}]"
             video_codec = ["-c:v", self.encoder, "-preset", self.preset, "-rc", "vbr",
                            "-b:v", self.bitrate, "-maxrate", self.maxrate,
                            "-bufsize", self.bufsize, "-pix_fmt", "yuv420p"]
-        else:
-            video_map = "0:v"
-            video_codec = ["-c:v", "copy"]
 
         cmd = (["ffmpeg", "-y"] + inputs +
                ["-filter_complex", ";".join(filters),

@@ -76,6 +76,55 @@ def build_chapters(cfg, total_seconds):
             for i, t in enumerate(titles)]
 
 
+def _mark_commentator_segments(timeline, srt_path, cfg, timeline_json):
+    """RULE 46: mark commentator/quote/expert segments for the frosted-glow
+    panel treatment (seg["style"] = "commentator").
+
+    Heuristic: the segment's visual is a comp_ clip (sliced from talk-show /
+    commentary sources) AND the words spoken inside the segment contain a
+    direct quote or an attribution cue ("said", "told", "according to",
+    "claims", ...). Capped and spaced so panels stay a premium accent, not
+    the default look. The timeline JSON is rewritten in place.
+    """
+    try:
+        from subtitle_formatter import parse_srt
+        cues = parse_srt(srt_path)
+    except Exception as e:
+        log(f"Commentator marking skipped (SRT parse failed): {e}")
+        return 0
+    max_panels = int(cfg.get("max_commentator_panels", 6))
+    min_gap_s = float(cfg.get("commentator_min_gap_s", 90.0))
+    attr_words = {"said", "says", "told", "tells", "according", "claims",
+                  "claimed", "revealed", "reveals", "admitted", "insiders",
+                  "sources", "reported", "reports"}
+    marked, last_t = 0, -1e9
+    for seg in timeline["segments"]:
+        if marked >= max_panels:
+            break
+        if seg.get("style") or seg.get("type") != "clip":
+            continue
+        if seg.get("section") in ("opening_intro_native", "datetime_card"):
+            continue
+        if "comp_" not in os.path.basename(seg.get("file", "")):
+            continue
+        if seg["start"] - last_t < min_gap_s:
+            continue
+        words = [c["text"] for c in cues
+                 if c["start_s"] < seg["end"] and c["end_s"] > seg["start"]]
+        text = " ".join(words).lower()
+        has_quote = any(q in text for q in ('"', '"', '"', "``", "''"))
+        has_attr = any(w in text.split() for w in attr_words)
+        if has_quote or has_attr:
+            seg["style"] = "commentator"
+            marked += 1
+            last_t = seg["start"]
+    if marked:
+        with open(timeline_json, "w", encoding="utf-8") as f:
+            json.dump(timeline, f, indent=1)
+        log(f"RULE 46: {marked} segment(s) marked for commentator panel.")
+    return marked
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description="YouTube Long-Form Documentary Production Pipeline",
@@ -330,17 +379,40 @@ def main():
         bench = {}
     else:
         log("Stage 3+4: GPU rendering and audio mux...")
-        # Captions are opt-in. This niche runs without burned-in captions, so the
-        # default is OFF; enable per-project with "burn_subtitles": true in the
-        # topic config, or force off with --no-subtitles.
+        # RULE 43: word-level styled captions are a signature look of this
+        # niche — burned in by default (supersedes RULE 8). Disable
+        # per-project with "burn_subtitles": false in the topic config, or
+        # force off with --no-subtitles. The standalone voiceover.srt is
+        # never modified; only the derived burn-in .ass is generated.
         subtitle_path = None
-        want_subs = bool(cfg.get("burn_subtitles", False)) and not args.no_subtitles
+        want_subs = bool(cfg.get("burn_subtitles", True)) and not args.no_subtitles
         if want_subs and srt_path:
             ass_beside = os.path.splitext(srt_path)[0] + ".ass"
-            subtitle_path = ass_beside if os.path.exists(ass_beside) else srt_path
+            if not os.path.exists(ass_beside):
+                from subtitle_formatter import convert_srt_to_ass
+                convert_srt_to_ass(srt_path, ass_beside)
+                log(f"Styled caption ASS generated: {os.path.basename(ass_beside)}")
+            subtitle_path = ass_beside
             log(f"Captions will be burned in from {os.path.basename(subtitle_path)}.")
         else:
-            log("Captions off (burn_subtitles disabled for this niche).")
+            log("Captions off (burn_subtitles disabled).")
+
+        # RULE 45: channel badge — generated once per video into the work dir.
+        badge_path = None
+        want_watermark = bool(cfg.get("watermark", True))
+        channel_name = cfg.get("channel_name") or "ROYAL INSIDER"
+        if want_watermark:
+            from style.watermark import make_badge
+            badge_path = os.path.join(work_dir, "badge.png")
+            if not os.path.exists(badge_path):
+                make_badge(channel_name, badge_path,
+                           size=int(cfg.get("badge_source_px", 200)))
+            log(f"Channel badge: {channel_name} -> {os.path.basename(badge_path)}")
+
+        # RULE 46: mark commentator/quote segments for the panel treatment.
+        if cfg.get("commentator_panel", True):
+            _mark_commentator_segments(timeline, srt_path, cfg,
+                                       timeline_json)
 
         _vo_vol = float(pick(args.vo_volume, "vo_volume", 2.10))
         r_engine = RenderEngine(
@@ -350,7 +422,14 @@ def main():
             limiter_ceiling=args.limiter_ceiling,
             encoder=args.encoder, bitrate=args.bitrate,
             look=pick(args.look, "look"), look_overrides=look_overrides,
-            subtitle_path=subtitle_path)
+            subtitle_path=subtitle_path,
+            channel_name=channel_name, watermark=want_watermark,
+            badge_path=badge_path,
+            badge_display_px=int(cfg.get("badge_display_px", 140)),
+            badge_margin_px=int(cfg.get("badge_margin_px", 24)),
+            signature_grade=bool(cfg.get("signature_grade", True)),
+            grade_grain=int(cfg.get("grade_grain", 9)),
+            commentator_panel=bool(cfg.get("commentator_panel", True)))
         bench = r_engine.render_and_mux(timeline_json, master_mp3, final_video_path,
                                         resume=not args.no_resume)
 
