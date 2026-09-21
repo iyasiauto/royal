@@ -201,8 +201,8 @@ def parse_args():
                           help="Minimum segments between clips from one source")
 
     audio = p.add_argument_group("audio")
-    audio.add_argument("--vo-volume", type=float, default=2.10, help="Voiceover gain (RULE 13)")
-    audio.add_argument("--bgm-volume", type=float, default=0.08, help="Music gain")
+    audio.add_argument("--vo-volume", type=float, default=None, help="Voiceover gain (RULE 13)")
+    audio.add_argument("--bgm-volume", type=float, default=None, help="Music gain")
     audio.add_argument("--limiter-ceiling", type=float, default=0.95,
                        help="Peak ceiling for the final mix (0 disables)")
 
@@ -458,10 +458,11 @@ def main():
                                        timeline_json)
 
         _vo_vol = float(pick(args.vo_volume, "vo_volume", 2.10))
+        _bgm_vol = float(pick(args.bgm_volume, "bgm_volume", 0.08))
         r_engine = RenderEngine(
             work_dir=work_dir, bgm_path=bgm, workers=args.workers,
             width=width, height=height, fps=fps,
-            vo_volume=_vo_vol, bgm_volume=args.bgm_volume,
+            vo_volume=_vo_vol, bgm_volume=_bgm_vol,
             limiter_ceiling=args.limiter_ceiling,
             encoder=args.encoder, bitrate=args.bitrate,
             look=pick(args.look, "look"), look_overrides=look_overrides,
