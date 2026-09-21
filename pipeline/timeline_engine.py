@@ -22,7 +22,7 @@ from PIL import Image
 
 from graphic_compositor import GraphicCompositor
 from semantic_matcher import (AssetIndex, ScriptTimeline, SemanticMatcher,
-                              folder_entity, load_tags)
+                              folder_entity, load_tags, norm_person)
 
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v")
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -622,16 +622,46 @@ class TimelineEngine:
             return graphics[cursor % len(graphics)], cursor + 1
         return None, cursor
 
-    def _relevance_gate(self, asset, score, graphics, cursor):
+    def _person_mismatch(self, match):
+        """RULE 47 extension: a segment naming a person must never show a
+        known-different person.
+
+        When the narration names someone (match["named_subjects"]) but the
+        picked visual is tagged as / filed under a different person who is
+        not named in this window, the visual is actively misleading (e.g.
+        William/Catherine footage over a Meghan line) - worse than a neutral
+        graphic card. Returns True when the pick must be guard-replaced.
+        """
+        if not match:
+            return False
+        named = match.get("named_subjects") or []
+        if not named:
+            return False
+        named_norm = {norm_person(e) for e in named}
+        # Persons tagged as actually on screen (clips).
+        screen = {norm_person(p) for p in (match.get("persons") or [])}
+        if screen and screen.isdisjoint(named_norm):
+            return True
+        # Folder-entity guess (images): the file lives under <person>/.
+        ent = norm_person(match.get("entity") or "")
+        if ent and ent not in named_norm:
+            return True
+        return False
+
+    def _relevance_gate(self, asset, score, graphics, cursor, match=None):
         """Apply the per-segment relevance threshold (G) to a matcher pick.
 
         Returns (file, replaced, new_cursor). Picks scoring below
         cfg['relevance_threshold'] are dropped in favour of a safe
         graphic-card fallback; with no graphics available the original pick
         is kept rather than leaving the segment without a visual.
+
+        A pick that shows a known-different person than the narration names
+        is also replaced (RULE 47 extension) - a neutral card never misleads.
         """
         threshold = float(self.cfg.get("relevance_threshold", 1.0))
-        if asset is not None and score is not None and score >= threshold:
+        if asset is not None and score is not None and score >= threshold \
+                and not self._person_mismatch(match):
             return asset.path, False, cursor
         card, cursor = self._guard_replacement(graphics, cursor)
         if card:
@@ -667,6 +697,14 @@ class TimelineEngine:
             except Exception:
                 asset, score = None, 0.0
             if asset is not None:
+                _match = (self.matcher.match_log[-1]
+                          if self.matcher.match_log else None)
+                if self._person_mismatch(_match):
+                    card, self._guard_cursor = self._guard_replacement(
+                        graphics, self._guard_cursor)
+                    if card:
+                        self._guard_replacements += 1
+                        return card, "zoomout", True
                 if score >= threshold and asset.path != prev_file:
                     motion = seg.get("motion") or random.choice(motions)
                     if kind == "image" and motion == prev_motion:
@@ -910,8 +948,11 @@ class TimelineEngine:
             if self.matcher:
                 asset, score, _ents = self.matcher.pick(start, end, "clip", at_index)
                 if asset:
+                    _match = (self.matcher.match_log[-1]
+                              if self.matcher.match_log else None)
                     file, replaced, self._guard_cursor = self._relevance_gate(
-                        asset, score, graphics, self._guard_cursor)
+                        asset, score, graphics, self._guard_cursor,
+                        match=_match)
                     if replaced:
                         log(f"Guard: clip pick at {start:.1f}s scored "
                             f"{score:.2f}; using graphic card.")
@@ -1021,8 +1062,11 @@ class TimelineEngine:
                     asset, score, _ents = self.matcher.pick(
                         current, current + dur, "image", seg_idx)
                     if asset:
+                        _match = (self.matcher.match_log[-1]
+                                  if self.matcher.match_log else None)
                         img, replaced, self._guard_cursor = self._relevance_gate(
-                            asset, score, graphics, self._guard_cursor)
+                            asset, score, graphics, self._guard_cursor,
+                            match=_match)
                         if replaced:
                             log(f"Guard: image pick at {current:.1f}s scored "
                                 f"{score:.2f}; using graphic card.")

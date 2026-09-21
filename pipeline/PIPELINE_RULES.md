@@ -314,6 +314,14 @@
 # counted in the build log ("Edit pass (B+G+H): ... M guard replacements").
 # - Enforced in: timeline_engine.py (_relevance_gate, _guard_replacement).
 #   Tests: tests/test_pacing_guard.py.
+#
+# Extension (2026-09-22, Video 20 QC): a pick that shows a KNOWN-DIFFERENT
+# person than the narration names is also guard-replaced, even when its score
+# passes the threshold. E.g. William/Catherine footage over a Meghan line, or
+# a Carole Middleton photo over a Harry line, is actively misleading - worse
+# than a neutral graphic card. Untagged/neutral visuals are unaffected.
+# - Enforced in: timeline_engine.py (_person_mismatch, called from
+#   _relevance_gate, pick_clip, add_image and _split_visual).
 
 ## RULE 48: Motion Target — >=80% Moving Visuals
 # Reference: ~92% of runtime is moving visuals. The pipeline targets >=80%:

@@ -180,6 +180,39 @@ class VoiceoverEngine:
         self.log(f"Chunk {chunk_idx}/{total_chunks} ai33pro ready in {tot_t:.1f}s ({dur:.1f}s audio, SRT={os.path.exists(srt_path)}).")
         return chunk_idx, mp3_path, c_words, dur, tot_t
 
+    def _apply_speed(self, mp3_path):
+        """Apply the configured speech rate to a TTS chunk via ffmpeg atempo.
+
+        FameSpeak's API accepts no speed parameter, so without this the
+        configured speed was silently ignored and every FameSpeak voiceover
+        rendered at 1.0x. Returns the path to use downstream (a cached
+        speed-adjusted sibling, so the adjustment is applied exactly once).
+        """
+        try:
+            speed = float(self.speed or 1.0)
+        except (TypeError, ValueError):
+            speed = 1.0
+        if abs(speed - 1.0) < 1e-6:
+            return mp3_path
+        adj_path = os.path.splitext(mp3_path)[0] + f".s{speed:g}.mp3"
+        if not (os.path.exists(adj_path) and os.path.getsize(adj_path) > 10000):
+            # atempo only accepts 0.5-2.0 per instance; chain for extremes.
+            filters, s = [], speed
+            while s < 0.5:
+                filters.append("atempo=0.5")
+                s /= 0.5
+            while s > 2.0:
+                filters.append("atempo=2.0")
+                s /= 2.0
+            filters.append(f"atempo={s:.6g}")
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", mp3_path, "-filter:a",
+                 ",".join(filters), "-b:a", "128k", adj_path],
+                capture_output=True, check=True)
+            self.log(f"Speech rate x{speed:g} applied -> "
+                     f"{os.path.basename(adj_path)}")
+        return adj_path
+
     def process_chunk_famespeak(self, text, chunk_idx, total_chunks, voice_chunks_dir):
         """FameSpeak ElevenLabs TTS (temporary provider while ai33pro credits
         are exhausted). Submits JSON, polls the statusUrl, downloads MP3.
@@ -190,67 +223,68 @@ class VoiceoverEngine:
         import requests
         mp3_path = os.path.join(voice_chunks_dir, f"chunk_{chunk_idx:03d}.mp3")
         c_words = len(text.split())
-        if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 10000:
-            dur = self.get_duration(mp3_path)
-            self.log(f"Chunk {chunk_idx}/{total_chunks} cached ({dur:.1f}s).")
-            return chunk_idx, mp3_path, c_words, dur, 0.0
+        tot_t = 0.0
+        if not (os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 10000):
+            t0 = time.time()
+            base = (self.base_url or "https://famespeak.online").rstrip("/")
+            # FameSpeak needs the bare ElevenLabs voice ID, e.g. the configured
+            # "elevenlabs_SAz9YHcvj6GT2YYXdXww" becomes "SAz9YHcvj6GT2YYXdXww".
+            vid = (self.voice_id or "").replace("elevenlabs_", "")
+            headers = {"Authorization": f"Bearer {self.api_key}"}
 
-        t0 = time.time()
-        base = (self.base_url or "https://famespeak.online").rstrip("/")
-        # FameSpeak needs the bare ElevenLabs voice ID, e.g. the configured
-        # "elevenlabs_SAz9YHcvj6GT2YYXdXww" becomes "SAz9YHcvj6GT2YYXdXww".
-        vid = (self.voice_id or "").replace("elevenlabs_", "")
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-
-        job_id = status_url = None
-        for attempt in range(8):
-            try:
-                r = requests.post(
-                    f"{base}/api/v1/eleven-labs/generations",
-                    headers=headers,
-                    json={"voiceId": vid, "text": text},
-                    timeout=90,
-                )
-                if r.status_code == 429:
-                    time.sleep(5.0 + attempt * 5.0); continue
-                if r.status_code == 202:
-                    j = r.json()
-                    job_id, status_url = j.get("id"), j.get("statusUrl")
-                    if job_id and status_url: break
-                else:
-                    self.log(f"Chunk {chunk_idx} submit HTTP {r.status_code}: {r.text[:120]}")
+            job_id = status_url = None
+            for attempt in range(8):
+                try:
+                    r = requests.post(
+                        f"{base}/api/v1/eleven-labs/generations",
+                        headers=headers,
+                        json={"voiceId": vid, "text": text},
+                        timeout=90,
+                    )
+                    if r.status_code == 429:
+                        time.sleep(5.0 + attempt * 5.0); continue
+                    if r.status_code == 202:
+                        j = r.json()
+                        job_id, status_url = j.get("id"), j.get("statusUrl")
+                        if job_id and status_url: break
+                    else:
+                        self.log(f"Chunk {chunk_idx} submit HTTP {r.status_code}: {r.text[:120]}")
+                        time.sleep(min(60.0, 4.0 + attempt * 4.0))
+                except Exception as e:
+                    self.log(f"Chunk {chunk_idx} submit retry {attempt+1}: {e}")
                     time.sleep(min(60.0, 4.0 + attempt * 4.0))
-            except Exception as e:
-                self.log(f"Chunk {chunk_idx} submit retry {attempt+1}: {e}")
-                time.sleep(min(60.0, 4.0 + attempt * 4.0))
-        if not job_id:
-            raise Exception(f"famespeak chunk {chunk_idx} submit failed after retries")
+            if not job_id:
+                raise Exception(f"famespeak chunk {chunk_idx} submit failed after retries")
 
-        # Poll the statusUrl until COMPLETED.
-        audio_rel = None
-        for _ in range(120):  # up to ~10 min per chunk
-            time.sleep(5.0)
-            try:
-                pr = requests.get(f"{base}{status_url}", headers=headers, timeout=30)
-                if pr.status_code != 200:
-                    continue
-                pj = pr.json()
-                st = (pj.get("status") or "").upper()
-                if st == "COMPLETED":
-                    audio_rel = pj.get("audioUrl")
-                    break
-                if st in ("FAILED", "ERROR"):
-                    raise Exception(f"famespeak job {job_id} status={st}: {pj.get('error')}")
-            except Exception:
-                time.sleep(2.0); continue
-        if not audio_rel:
-            raise Exception(f"famespeak chunk {chunk_idx} never completed")
+            # Poll the statusUrl until COMPLETED.
+            audio_rel = None
+            for _ in range(120):  # up to ~10 min per chunk
+                time.sleep(5.0)
+                try:
+                    pr = requests.get(f"{base}{status_url}", headers=headers, timeout=30)
+                    if pr.status_code != 200:
+                        continue
+                    pj = pr.json()
+                    st = (pj.get("status") or "").upper()
+                    if st == "COMPLETED":
+                        audio_rel = pj.get("audioUrl")
+                        break
+                    if st in ("FAILED", "ERROR"):
+                        raise Exception(f"famespeak job {job_id} status={st}: {pj.get('error')}")
+                except Exception:
+                    time.sleep(2.0); continue
+            if not audio_rel:
+                raise Exception(f"famespeak chunk {chunk_idx} never completed")
 
-        self.download_audio(f"{base}{audio_rel}", mp3_path,
-                            extra_headers={"Authorization": f"Bearer {self.api_key}"})
+            self.download_audio(f"{base}{audio_rel}", mp3_path,
+                                extra_headers={"Authorization": f"Bearer {self.api_key}"})
+            tot_t = time.time() - t0
+            self.log(f"Chunk {chunk_idx}/{total_chunks} famespeak downloaded in {tot_t:.1f}s.")
+        # FameSpeak API takes no speed parameter: apply the configured
+        # speech rate locally so cfg speed is honoured (was silently 1.0x).
+        mp3_path = self._apply_speed(mp3_path)
         dur = self.get_duration(mp3_path)
-        tot_t = time.time() - t0
-        self.log(f"Chunk {chunk_idx}/{total_chunks} famespeak ready in {tot_t:.1f}s ({dur:.1f}s audio).")
+        self.log(f"Chunk {chunk_idx}/{total_chunks} ready ({dur:.1f}s audio).")
         return chunk_idx, mp3_path, c_words, dur, tot_t
 
     def _transcribe_word_srt(self, mp3_path, srt_path):

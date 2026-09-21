@@ -19,7 +19,7 @@
   "tts": "ai33pro",
   "tts_base_url": "https://api.ai33.pro",
   "voice_id": "elevenlabs_SAz9YHcvj6GT2YYXdXww",
-  "speed": 0.95,
+  "speed": 0.98,
   "vo_volume": 2.1,
   "bgm_volume": 0.03,
   "topic_asset_weight": 8,
@@ -43,5 +43,6 @@
   "headlines": [],
   "quotes": [],
   "entity_boost": 25.0,
-  "clip_cooldown": 10
+  "clip_cooldown": 10,
+  "signature_grade": false
 }
