@@ -50,8 +50,13 @@ STYLE_DEFAULTS = {
     # B — pacing: split visual holds longer than this into 2-4s sub-shots
     "pacing_max_hold_s": 6.0,
     "pacing_no_split_sections": ["opening_intro_native", "datetime_card"],
-    # G — relevance guard: matcher scores below this are dropped/replaced
-    "relevance_threshold": 1.0,
+    # G — relevance guard: matcher scores below this are dropped/replaced.
+    # Calibrated 2026-09-22: typical best-pick scores average ~1.3, so 1.0
+    # carded ~90% of every video into a repeating graphic-card slideshow.
+    # Real photos scoring >= 0 are legitimate best-available B-roll and are
+    # kept; only entity-penalised picks (score < 0) and person mismatches
+    # become graphic cards.
+    "relevance_threshold": 0.0,
     # C — word-level styled captions burned in (supersedes RULE 8)
     "burn_subtitles": True,
     # D — signature grade: subtle RGB-split + film grain on the final mux

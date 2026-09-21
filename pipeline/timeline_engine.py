@@ -22,7 +22,8 @@ from PIL import Image
 
 from graphic_compositor import GraphicCompositor
 from semantic_matcher import (AssetIndex, ScriptTimeline, SemanticMatcher,
-                              folder_entity, load_tags, norm_person)
+                              folder_entity, load_tags, norm_person,
+                              tokenize)
 
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v")
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -579,7 +580,7 @@ class TimelineEngine:
     #   pacing_max_hold_s      (default 6.0)  - split longer visual holds
     #   pacing_no_split_sections (default ["opening_intro_native",
     #                              "datetime_card"]) - never split these
-    #   relevance_threshold    (default 1.0)  - drop matcher picks below this
+    #   relevance_threshold    (default 0.0)  - drop matcher picks below this
 
     def _wheel_static_slots(self):
         """Indices (mod 12) the renderer's motion wheel marks fully static.
@@ -648,6 +649,98 @@ class TimelineEngine:
             return True
         return False
 
+    def _final_person_sweep(self, segments, graphics):
+        """Post-build person-sync sweep (RULE 47 extension, 2026-09-22).
+
+        The per-pick guard only sees the matcher's pick window, so a name
+        spoken at a segment boundary can slip through (e.g. "Harry" said at
+        1184.6s while the 1182.0s pick window didn't contain it, leaving a
+        Charles/Camilla clip on screen). This pass re-checks every FINAL
+        segment against the word-level script inside its actual [start, end]
+        and swaps any remaining wrong-person visual for a graphic card, no
+        matter which pick path placed it (matcher, clip groups, curated
+        fallbacks, pacing splits). Returns the number of swaps.
+        """
+        if not self.matcher or not self.matcher.script \
+                or not self.matcher.script.spans:
+            return 0
+        assets = getattr(getattr(self.matcher, "index", None), "assets", None)
+        if not assets:
+            return 0
+        # Tag values that are not identifiable individuals: the sweep must
+        # neither treat them as "named" nor as a conflicting person shown.
+        generic = {"member of the public", "official/staff", "outriders"}
+        known = set()
+        for a in assets:
+            known.update(norm_person(p) for p in (a.persons or [])
+                         if norm_person(p) not in generic)
+        if not known:
+            return 0
+
+        def shown_persons(path):
+            for a in assets:
+                if a.path == path:
+                    ps = {norm_person(p) for p in (a.persons or [])
+                          if norm_person(p) not in generic}
+                    if ps:
+                        return ps
+                    ent = norm_person(a.entity or "")
+                    if ent and ent in known:
+                        return {ent}
+                    break
+            base = os.path.basename(path)
+            m = re.match(r"([A-Z][a-z]+(?:_[A-Z][a-z]+)+)_\d+\.", base)
+            if m:
+                ent = norm_person(m.group(1).replace("_", " "))
+                if ent in known:
+                    return {ent}
+            return set()
+
+        gfx = {os.path.abspath(g) for g in (graphics or [])}
+        gfx_dir = os.path.abspath(self.graphics_dir or "")
+        swaps = 0
+        for s in segments:
+            if s.get("type") not in ("image", "clip"):
+                continue
+            if s.get("has_audio"):
+                continue  # intro carries source audio; never card it
+            f = s.get("file") or ""
+            af = os.path.abspath(f)
+            if af in gfx or (gfx_dir and af.startswith(gfx_dir + os.sep)):
+                continue  # already a safe card
+            shown = shown_persons(f)
+            if not shown:
+                continue
+            # Named-person detection: a known person's DISTINCTIVE (last)
+            # name-token spoken in [start - 1.0s, end] names them. The 1s
+            # lookback covers boundary cases (e.g. "Harry" at 74.62s while
+            # the 74.93s segment shows someone else) - perceptually the name
+            # attaches to this visual. Deliberately not the matcher's IDF
+            # partial logic: the sweep must be deterministic, not
+            # tag-frequency dependent.
+            try:
+                text = self.matcher.script.text_between(
+                    s["start"] - 1.0, s["end"])
+                words = set(tokenize(text))
+            except Exception:
+                continue
+            named = {p for p in known if p.split()[-1] in words}
+            if named and shown.isdisjoint(named):
+                card, self._guard_cursor = self._guard_replacement(
+                    graphics, self._guard_cursor)
+                if card:
+                    log(f"Person sweep: {s['start']:.1f}s names "
+                        f"{sorted(named)} but shows {sorted(shown)}; "
+                        f"using graphic card.")
+                    s["type"] = "image"
+                    s["file"] = card
+                    s["motion"] = "zoomout"
+                    s["postcard"] = False
+                    s["section"] = "person_guard_sweep"
+                    self._guard_replacements += 1
+                    swaps += 1
+        return swaps
+
     def _relevance_gate(self, asset, score, graphics, cursor, match=None):
         """Apply the per-segment relevance threshold (G) to a matcher pick.
 
@@ -659,7 +752,7 @@ class TimelineEngine:
         A pick that shows a known-different person than the narration names
         is also replaced (RULE 47 extension) - a neutral card never misleads.
         """
-        threshold = float(self.cfg.get("relevance_threshold", 1.0))
+        threshold = float(self.cfg.get("relevance_threshold", 0.0))
         if asset is not None and score is not None and score >= threshold \
                 and not self._person_mismatch(match):
             return asset.path, False, cursor
@@ -690,7 +783,7 @@ class TimelineEngine:
 
         Returns (file, motion, guard_replaced).
         """
-        threshold = float(self.cfg.get("relevance_threshold", 1.0))
+        threshold = float(self.cfg.get("relevance_threshold", 0.0))
         if self.matcher and kind in ("image", "clip"):
             try:
                 asset, score, _ents = self.matcher.pick(s0, s1, kind, pos)
@@ -875,7 +968,7 @@ class TimelineEngine:
                     # G: relevance guard — a weak intro pick falls back to the
                     # first content clip (the intro needs real footage with
                     # source audio, so no graphic-card swap here).
-                    _thr = float(self.cfg.get("relevance_threshold", 1.0))
+                    _thr = float(self.cfg.get("relevance_threshold", 0.0))
                     if _score < _thr:
                         log(f"Intro pick scored {_score:.2f} below relevance "
                             f"threshold {_thr}; using first content clip.")
@@ -1191,6 +1284,13 @@ class TimelineEngine:
         # slots (target: >=80% of runtime moving).
         segments = self._apply_pacing_pass(segments, graphics, curated)
         segments = self._renumber_for_motion(segments)
+
+        # Final person-sync sweep on finished segment bounds (RULE 47 ext):
+        # catches boundary cases the per-pick guard can't see.
+        swept = self._final_person_sweep(segments, graphics)
+        if swept:
+            log(f"Person sweep: replaced {swept} wrong-person segment(s) "
+                f"with graphic cards.")
 
         counts = {}
         for s in segments:
